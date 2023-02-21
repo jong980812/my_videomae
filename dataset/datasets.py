@@ -62,13 +62,13 @@ def build_dataset(is_train, test_mode, args):
         anno_path = None
         if is_train is True:
             mode = 'train'
-            anno_path = os.path.join(args.data_path, 'train.csv')
+            anno_path = os.path.join(args.anno_path, 'kinetics400_train.csv')
         elif test_mode is True:
             mode = 'test'
-            anno_path = os.path.join(args.data_path, 'test.csv') 
+            anno_path = os.path.join(args.anno_path, 'kinetics400_test.csv') 
         else:  
             mode = 'validation'
-            anno_path = os.path.join(args.data_path, 'val.csv') 
+            anno_path = os.path.join(args.anno_path, 'kinetics400_val.csv') 
 
         dataset = VideoClsDataset(
             anno_path=anno_path,
@@ -93,13 +93,13 @@ def build_dataset(is_train, test_mode, args):
         anno_path = None
         if is_train is True:
             mode = 'train'
-            anno_path = os.path.join(args.data_path, 'train_mp4.csv')
+            anno_path = os.path.join(args.anno_path, 'train_mp4.csv')
         elif test_mode is True:
             mode = 'test'
-            anno_path = os.path.join(args.data_path, 'test_mp4.csv')
+            anno_path = os.path.join(args.anno_path, 'test_mp4.csv')
         else:
             mode = 'validation'
-            anno_path = os.path.join(args.data_path, 'val_mp4.csv')
+            anno_path = os.path.join(args.anno_path, 'val_mp4.csv')
     
         dataset = SSVideoClsDataset(
             anno_path=anno_path,
@@ -123,13 +123,13 @@ def build_dataset(is_train, test_mode, args):
         anno_path = None
         if is_train is True:
             mode = 'train'
-            anno_path = os.path.join(args.data_path, 'mini_train_mp4.csv')
+            anno_path = os.path.join(args.anno_path, 'mini_train_mp4.csv')
         elif test_mode is True:
             mode = 'test'
-            anno_path = os.path.join(args.data_path, 'mini_test_mp4.csv')
+            anno_path = os.path.join(args.anno_path, 'mini_test_mp4.csv')
         else:
             mode = 'validation'
-            anno_path = os.path.join(args.data_path, 'mini_val_mp4.csv')
+            anno_path = os.path.join(args.anno_path, 'mini_val_mp4.csv')
 
         dataset = SSVideoClsDataset(
                 anno_path=anno_path,
