@@ -1,0 +1,9 @@
+result/
+debug/
+*.mp4
+*.out
+*.err
+*.csv
+*.pt
+*.multinode_sh/
+dataset/
