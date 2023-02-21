@@ -3,17 +3,21 @@ import os
 import math
 import time
 import json
-from collections import defaultdict, deque
+from collections import defaultdict, deque, OrderedDict
 import datetime
 import numpy as np
 from timm.utils import get_state_dict
+from timm.models.layers import trunc_normal_
 from torch.utils.data._utils.collate import default_collate
 from pathlib import Path
 import subprocess
 import torch
+import torch.nn as nn
 import torch.distributed as dist
 from torch._six import inf
 import random
+import requests
+from typing import Dict
 
 from tensorboardX import SummaryWriter
 
@@ -255,19 +259,21 @@ def init_distributed_mode(args):
         os.environ['LOCAL_RANK'] = str(args.gpu)
         os.environ['RANK'] = str(args.rank)
         os.environ['WORLD_SIZE'] = str(args.world_size)
-    elif 'SLURM_PROCID' in os.environ:
-        args.rank = int(os.environ['SLURM_PROCID'])
-        args.gpu = int(os.environ['SLURM_LOCALID'])
-        args.world_size = int(os.environ['SLURM_NTASKS'])
-        os.environ['RANK'] = str(args.rank)
-        os.environ['LOCAL_RANK'] = str(args.gpu)
-        os.environ['WORLD_SIZE'] = str(args.world_size)
+    # elif 'SLURM_PROCID' in os.environ:
+    #     if "WORLD_SIZE" in os.environ:
+    #         args.world_size = int(os.environ["WORLD_SIZE"])
+    #     ngpus_per_node = torch.cuda.device_count()
+    #     args.rank = int(os.environ['SLURM_PROCID'])
+    #     args.gpu = args.rank % torch.cuda.device_count()
+    #     args.world_size = int(os.environ['SLURM_NTASKS'])
+    #     # os.environ['RANK'] = str(args.rank)
+    #     # os.environ['LOCAL_RANK'] = str(args.gpu)
+    #     # os.environ['WORLD_SIZE'] = str(args.world_size)
 
-        node_list = os.environ['SLURM_NODELIST']
-        addr = subprocess.getoutput(
-            f'scontrol show hostname {node_list} | head -n1')
-        if 'MASTER_ADDR' not in os.environ:
-            os.environ['MASTER_ADDR'] = addr
+    #     node_list = os.environ['SLURM_NODELIST']
+    #     addr = subprocess.getoutput(
+    #         f'scontrol show hostname {node_list} | head -n1')
+    #     os.environ['MASTER_ADDR'] = addr
     elif 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
         args.rank = int(os.environ["RANK"])
         args.world_size = int(os.environ['WORLD_SIZE'])
@@ -284,7 +290,7 @@ def init_distributed_mode(args):
     print('| distributed init (rank {}): {}, gpu {}'.format(
         args.rank, args.dist_url, args.gpu), flush=True)
     torch.distributed.init_process_group(backend=args.dist_backend, init_method=args.dist_url,
-                                         world_size=args.world_size, rank=args.rank)
+                                         world_size=args.world_size, rank=args.rank,timeout=datetime.timedelta(seconds=100))
     torch.distributed.barrier()
     # assert torch.distributed.is_initialized()
     setup_for_distributed(args.rank == 0)
@@ -336,7 +342,194 @@ def load_state_dict(model, state_dict, prefix='', ignore_missing="relative_posit
             model.__class__.__name__, ignore_missing_keys))
     if len(error_msgs) > 0:
         print('\n'.join(error_msgs))
+        
+def load_bidir_weights(model, args):
+    if args.vmae_finetune.startswith('https'):
+        checkpoint = torch.hub.load_state_dict_from_url(
+            args.vmae_finetune, map_location='cpu', check_hash=True)
+    else:
+        checkpoint = torch.load(args.vmae_finetune, map_location='cpu')
 
+    print("Load VideoMAE ckpt from %s" % args.vmae_finetune)
+    checkpoint_model = None
+    clip_checkpoint = torch.jit.load(args.clip_finetune, map_location='cpu')
+    print("Load CLIP ckpt from %s" % args.vmae_finetune)
+    checkpoint_clip = clip_checkpoint.visual.state_dict()
+    for model_key in args.model_key.split('|'):
+        if model_key in checkpoint:
+            checkpoint_model = checkpoint[model_key]
+            print("Load state_dict by model_key = %s" % model_key)
+            break
+    if checkpoint_model is None:
+        checkpoint_model = checkpoint
+    state_dict = model.state_dict()
+    for k in ['head.weight', 'head.bias']:
+        if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
+            print(f"Removing key {k} from pretrained checkpoint")
+            del checkpoint_model[k]
+
+    all_keys = list(checkpoint_model.keys())
+    clip_all_keys = list(checkpoint_clip.keys())
+    new_dict = OrderedDict()
+    for key in all_keys:
+        if key.startswith('backbone.'):
+            new_dict[key[9:]] = checkpoint_model[key]
+        elif key.startswith('encoder.'):
+            new_dict[key[8:]] = checkpoint_model[key]
+        else:
+            new_dict[key] = checkpoint_model[key]
+            
+    # add new code for load clip weight
+    for key in clip_all_keys:
+        if key.startswith('transformer.'):
+            if key[23] == '.':
+                new_dict['blocks.'+ key[22] + '.clip_' + key[24:]] = checkpoint_clip[key]
+            else : # layer10 ~ 11 process
+                new_dict['blocks.'+ key[22:24] + '.clip_' + key[25:]] = checkpoint_clip[key]
+        else:
+            new_dict['clip_' + key] = checkpoint_clip[key]
+            
+    # load로 불러온 pre-trained weight를 new_dict에 담아주고
+    checkpoint_model = new_dict
+
+    # interpolate position embedding
+    if 'pos_embed' in checkpoint_model:
+        pos_embed_checkpoint = checkpoint_model['pos_embed']
+        embedding_size = pos_embed_checkpoint.shape[-1] # channel dim
+        num_patches = model.patch_embed.num_patches # 
+        num_extra_tokens = model.pos_embed.shape[-2] - num_patches # 0/1
+
+        # height (== width) for the checkpoint position embedding 
+        orig_size = int(((pos_embed_checkpoint.shape[-2] - num_extra_tokens)//(args.num_frames // model.patch_embed.tubelet_size)) ** 0.5)
+        # height (== width) for the new position embedding
+        new_size = int((num_patches // (args.num_frames // model.patch_embed.tubelet_size) )** 0.5)
+        # class_token and dist_token are kept unchanged
+        if orig_size != new_size:
+            print("Position interpolate from %dx%d to %dx%d" % (orig_size, orig_size, new_size, new_size))
+            extra_tokens = pos_embed_checkpoint[:, :num_extra_tokens]
+            # only the position tokens are interpolated
+            pos_tokens = pos_embed_checkpoint[:, num_extra_tokens:]
+            # B, L, C -> BT, H, W, C -> BT, C, H, W
+            pos_tokens = pos_tokens.reshape(-1, args.num_frames // model.patch_embed.tubelet_size, orig_size, orig_size, embedding_size)
+            pos_tokens = pos_tokens.reshape(-1, orig_size, orig_size, embedding_size).permute(0, 3, 1, 2)
+            pos_tokens = torch.nn.functional.interpolate(
+                pos_tokens, size=(new_size, new_size), mode='bicubic', align_corners=False)
+            # BT, C, H, W -> BT, H, W, C ->  B, T, H, W, C
+            pos_tokens = pos_tokens.permute(0, 2, 3, 1).reshape(-1, args.num_frames // model.patch_embed.tubelet_size, new_size, new_size, embedding_size) 
+            pos_tokens = pos_tokens.flatten(1, 3) # B, L, C
+            new_pos_embed = torch.cat((extra_tokens, pos_tokens), dim=1)
+            checkpoint_model['pos_embed'] = new_pos_embed
+
+    load_state_dict(model, checkpoint_model, prefix=args.model_prefix)
+        
+def load_clip_weights(model,load_path: str) -> Dict[str, torch.Tensor]:
+    clip_model = torch.jit.load(load_path, map_location='cpu')
+    clip_model = clip_model.visual
+    src_state_dict = clip_model.state_dict()
+    src_state_dict = dict((k, v.float()) for k, v in src_state_dict.items())
+
+    dst_state_dict = {}
+    
+    dst_state_dict['cls_token'] = src_state_dict['class_embedding']
+    dst_state_dict['pos_embed'] = src_state_dict['positional_embedding']
+    dst_state_dict['patch_embed.proj.weight'] = src_state_dict['conv1.weight'].flatten(1)
+    dst_state_dict['patch_embed.proj.bias'] = torch.zeros([src_state_dict['conv1.weight'].size(0)])
+    
+    dst_state_dict['ln_pre.weight'] = src_state_dict['ln_pre.weight']
+    dst_state_dict['ln_pre.bias'] = src_state_dict['ln_pre.bias']
+    
+    dst_state_dict['ln_post.weight'] = src_state_dict['ln_post.weight']
+    dst_state_dict['ln_post.bias'] = src_state_dict['ln_post.bias']
+
+    block_idx = 0
+    while True:
+        src_prefix = 'transformer.resblocks.%d.' % block_idx
+        dst_prefix = 'blocks.%d.' % block_idx
+
+        src_block_state_dict = dict((k[len(src_prefix):], v) for k, v in src_state_dict.items() if k.startswith(src_prefix))
+        if len(src_block_state_dict) == 0:
+            break
+
+        dst_block_state_dict = {}
+        feat_dim = src_block_state_dict['ln_1.weight'].size(0)
+
+        for i, dst_name in enumerate(('q', 'k', 'v')):
+            dst_block_state_dict['attn.%s_proj.weight' % dst_name] = src_block_state_dict['attn.in_proj_weight'][feat_dim * i: feat_dim * (i + 1)]
+            dst_block_state_dict['attn.%s_proj.bias' % dst_name] = src_block_state_dict['attn.in_proj_bias'][feat_dim * i: feat_dim * (i + 1)]
+        
+        dst_block_state_dict['attn.out_proj.weight'] = src_block_state_dict['attn.out_proj.weight']
+        dst_block_state_dict['attn.out_proj.bias'] = src_block_state_dict['attn.out_proj.bias']
+
+        dst_block_state_dict['mlp.fc1.weight'] = src_block_state_dict['mlp.c_fc.weight']
+        dst_block_state_dict['mlp.fc1.bias'] = src_block_state_dict['mlp.c_fc.bias']
+        dst_block_state_dict['mlp.fc2.weight'] = src_block_state_dict['mlp.c_proj.weight']
+        dst_block_state_dict['mlp.fc2.bias'] = src_block_state_dict['mlp.c_proj.bias']
+
+        dst_block_state_dict['norm1.weight'] = src_block_state_dict['ln_1.weight']
+        dst_block_state_dict['norm1.bias'] = src_block_state_dict['ln_1.bias']
+        dst_block_state_dict['norm2.weight'] = src_block_state_dict['ln_2.weight']
+        dst_block_state_dict['norm2.bias'] = src_block_state_dict['ln_2.bias']
+
+        dst_state_dict.update(dict((dst_prefix + k, v) for k, v in dst_block_state_dict.items()))
+        block_idx += 1
+    
+    load_state_dict(model, dst_state_dict)      
+
+        
+def laod_vmae_weights(model, pre_trained_weight, args):
+    checkpoint = torch.load(pre_trained_weight, map_location='cpu')
+    print("Load ckpt from %s" % pre_trained_weight)
+    for model_key in args.model_key.split('|'):
+        if model_key in checkpoint:
+            checkpoint_model = checkpoint[model_key]
+            print("Load state_dict by model_key = %s" % model_key)
+            break
+    if checkpoint_model is None:
+        checkpoint_model = checkpoint
+    state_dict = model.state_dict()
+    for k in ['head.weight', 'head.bias']:
+        if k in checkpoint_model and checkpoint_model[k].shape != state_dict[k].shape:
+            print(f"Removing key {k} from pretrained checkpoint")
+            del checkpoint_model[k]
+    all_keys = list(checkpoint_model.keys())
+    new_dict = OrderedDict()
+    for key in all_keys:
+        if key.startswith('backbone.'):
+            new_dict[key[9:]] = checkpoint_model[key]
+        elif key.startswith('encoder.'):
+            new_dict[key[8:]] = checkpoint_model[key]
+        else:
+            new_dict[key] = checkpoint_model[key]
+    checkpoint_model = new_dict
+    if 'pos_embed' in checkpoint_model:
+        pos_embed_checkpoint = checkpoint_model['pos_embed']
+        embedding_size = pos_embed_checkpoint.shape[-1] # channel dim
+        num_patches = model.patch_embed.num_patches # 
+        num_extra_tokens = model.pos_embed.shape[-2] - num_patches # 0/1
+
+        # height (== width) for the checkpoint position embedding 
+        orig_size = int(((pos_embed_checkpoint.shape[-2] - num_extra_tokens)//(args.num_frames // model.patch_embed.tubelet_size)) ** 0.5)
+        # height (== width) for the new position embedding
+        new_size = int((num_patches // (args.num_frames // model.patch_embed.tubelet_size) )** 0.5)
+        # class_token and dist_token are kept unchanged
+        if orig_size != new_size:
+            print("Position interpolate from %dx%d to %dx%d" % (orig_size, orig_size, new_size, new_size))
+            extra_tokens = pos_embed_checkpoint[:, :num_extra_tokens]
+            # only the position tokens are interpolated
+            pos_tokens = pos_embed_checkpoint[:, num_extra_tokens:]
+            # B, L, C -> BT, H, W, C -> BT, C, H, W
+            pos_tokens = pos_tokens.reshape(-1, args.num_frames // model.patch_embed.tubelet_size, orig_size, orig_size, embedding_size)
+            pos_tokens = pos_tokens.reshape(-1, orig_size, orig_size, embedding_size).permute(0, 3, 1, 2)
+            pos_tokens = torch.nn.functional.interpolate(
+                pos_tokens, size=(new_size, new_size), mode='bicubic', align_corners=False)
+            # BT, C, H, W -> BT, H, W, C ->  B, T, H, W, C
+            pos_tokens = pos_tokens.permute(0, 2, 3, 1).reshape(-1, args.num_frames // model.patch_embed.tubelet_size, new_size, new_size, embedding_size) 
+            pos_tokens = pos_tokens.flatten(1, 3) # B, L, C
+            new_pos_embed = torch.cat((extra_tokens, pos_tokens), dim=1)
+            checkpoint_model['pos_embed'] = new_pos_embed
+            
+    load_state_dict(model, checkpoint_model, prefix=args.model_prefix)
+            
 
 class NativeScalerWithGradNormCount:
     state_dict_key = "amp_scaler"
@@ -533,3 +726,80 @@ def multiple_samples_collate(batch, fold=False):
         return [inputs], labels, video_idx, extra_data
     else:
         return inputs, labels, video_idx, extra_data
+
+def cross_multiple_samples_collate(batch, fold=False):
+    """
+    Collate function for repeated augmentation. Each instance in the batch has
+    more than one sample.
+    Args:
+        batch (tuple or list): data batch to collate.
+    Returns:
+        (tuple): collated data batch.
+    """
+    s_inputs, t_inputs, labels, video_idx, extra_data = zip(*batch)
+    s_inputs = [item for item in s_inputs for i in range(2)] # sample을 2개씩 sampling하니까 range2로 반복시켜줬다. 나중에 num_sample숫자에 맞춰 코드 짜줘야 한다.
+    t_inputs = [item for sublist in t_inputs for item in sublist]
+    labels = [item for sublist in labels for item in sublist]
+    video_idx = [item for sublist in video_idx for item in sublist]
+    s_inputs, t_inputs, labels, video_idx, extra_data = (
+        default_collate(s_inputs),
+        default_collate(t_inputs),
+        default_collate(labels),
+        default_collate(video_idx),
+        default_collate(extra_data),
+    )
+    if fold:
+        return [s_inputs, t_inputs], labels, video_idx, extra_data
+    else:
+        return s_inputs, t_inputs, labels, video_idx, extra_data
+    
+def freeze_block(model,block_list):
+    freeze_list = []
+    for name, param in model.named_parameters():
+        for block in block_list:#if block in block_list
+            if block in name:
+                param.requires_grad = False
+                freeze_list.append(name)
+                break
+            else:
+                param.requires_grad = True
+    return model, freeze_list
+
+def unfreeze_block(model, block_list):
+    unfreeze_list = []
+    for name, param in model.named_parameters():
+        for block in block_list:#if block in block_list
+            if block in name:
+                param.requires_grad = True
+                unfreeze_list.append(name)
+                break
+            else:
+                param.requires_grad = False
+    return model, unfreeze_list
+                
+def change_verification_mode(model, nb_classes):
+    # freeze all parameters
+    unfreeze_list = ['cross_block', 'fc_norm', 'head']
+    for name, param in model.named_parameters():
+        for block in unfreeze_list:
+            if block in name:
+                param.requires_grad = True
+                break
+            else:
+                param.requires_grad = False
+
+    
+    # inintialize fc_norm
+    nn.init.constant_(model.fc_norm.bias, 0)
+    nn.init.constant_(model.fc_norm.weight, 1.0)
+    
+    #reset head
+    trunc_normal_(model.head.weight, std=.02)
+    nn.init.constant_(model.head.bias, 0)
+
+def notice_message(token, channel, text, attachments):
+    attachments = json.dumps(attachments) # 리스트는 Json 으로 덤핑 시켜야 Slack한테 제대로 간다.
+    response = requests.post("https://slack.com/api/chat.postMessage",
+        headers={"Authorization": "Bearer "+token},
+        data={"channel": channel, "text": text ,"attachments": attachments})
+    
