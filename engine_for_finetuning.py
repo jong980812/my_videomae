@@ -26,7 +26,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     device: torch.device, epoch: int, loss_scaler, max_norm: float = 0,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None, log_writer=None,
                     start_steps=None, lr_schedule_values=None, wd_schedule_values=None,
-                    num_training_steps_per_epoch=None, update_freq=None):
+                    num_training_steps_per_epoch=None, update_freq=None,args=None):
     model.train(True)
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
@@ -55,9 +55,20 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
-
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
+
+        ###
+        num_frames=args.num_frames
+        if args.use_clip:#!center frame
+            if args.clip_frames == 1:
+                # print("Using center Frame in Spatial path")
+                samples = samples[:,:,num_frames//2,:,:].to(device,non_blocking=True)
+            elif args.clip_frames == num_frames:
+                # print("Using all frame in Spatial path")
+                samples=samples 
+            samples=samples.half()
+        ### 
 
         if loss_scaler is None:
             samples = samples.half()

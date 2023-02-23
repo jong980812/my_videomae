@@ -19,7 +19,7 @@ from util_tools.optim_factory import create_optimizer, get_parameter_groups, Lay
 from dataset.datasets import build_dataset
 from engine_for_finetuning import train_one_epoch, validation_one_epoch, final_test, merge
 from util_tools.utils import NativeScalerWithGradNormCount as NativeScaler
-from util_tools.utils import  multiple_samples_collate,notice_message
+from util_tools.utils import  multiple_samples_collate,notice_message,freeze_block
 from util_tools import utils
 import modeling_finetune
 import clip_model.clip as clip
@@ -197,6 +197,7 @@ def get_args():
     
     parser.add_argument('--use_mae', action='store_true')
     parser.add_argument('--mae_finetune', default='', help='finetune from checkpoint')
+    parser.add_argument('--freeze_layers', default=None, nargs='+', type=str)
 
     known_args, _ = parser.parse_known_args()
 
@@ -399,7 +400,9 @@ def main(args, ds_init):
         utils.load_state_dict(model, checkpoint_model, prefix=args.model_prefix)
 
     model.to(device)
-
+    if args.freeze_layers is not None:
+        model, freeze_list = freeze_block(model, args.freeze_layers)
+        print('freeze list:', freeze_list)
     model_ema = None
     if args.model_ema:
         model_ema = ModelEma(
@@ -515,7 +518,7 @@ def main(args, ds_init):
             device, epoch, loss_scaler, args.clip_grad, model_ema, mixup_fn,
             log_writer=log_writer, start_steps=epoch * num_training_steps_per_epoch,
             lr_schedule_values=lr_schedule_values, wd_schedule_values=wd_schedule_values,
-            num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=args.update_freq,
+            num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=args.update_freq,args=args
         )
         if args.output_dir and args.save_ckpt:
             if (epoch + 1) % args.save_ckpt_freq == 0 or epoch + 1 == args.epochs:
