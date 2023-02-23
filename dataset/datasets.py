@@ -57,7 +57,9 @@ def build_pretraining_dataset(args):
 
 
 def build_dataset(is_train, test_mode, args):
+    print(args.data_set)
     if args.data_set == 'Kinetics-400':
+        assert args.pred_type == "verb"
         mode = None
         anno_path = None
         if is_train is True:
@@ -89,6 +91,7 @@ def build_dataset(is_train, test_mode, args):
         nb_classes = 400
     
     elif args.data_set == 'SSV2':
+        assert args.pred_type == "verb"
         mode = None
         anno_path = None
         if is_train is True:
@@ -119,6 +122,7 @@ def build_dataset(is_train, test_mode, args):
         nb_classes = 174
     
     elif args.data_set =='MINI_SSV2':
+        assert args.pred_type == "verb"
         mode = None
         anno_path = None
         if is_train is True:
@@ -277,6 +281,7 @@ def build_dataset(is_train, test_mode, args):
         nb_classes = 51
     else:
         raise NotImplementedError()
+    print(nb_classes,nb_classes)
     assert nb_classes == args.nb_classes
     print("Number of the class = %d" % args.nb_classes)
 

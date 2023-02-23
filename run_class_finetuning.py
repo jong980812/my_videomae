@@ -22,7 +22,7 @@ from util_tools.utils import NativeScalerWithGradNormCount as NativeScaler
 from util_tools.utils import  multiple_samples_collate,notice_message
 from util_tools import utils
 import modeling_finetune
-
+import clip_model.clip as clip
 
 def get_args():
     parser = argparse.ArgumentParser('VideoMAE fine-tuning and evaluation script for video classification', add_help=False)
@@ -32,7 +32,7 @@ def get_args():
     parser.add_argument('--save_ckpt_freq', default=100, type=int)
 
     # Model parameters
-    parser.add_argument('--model', default='vit_base_patch16_224', type=str, metavar='MODEL',
+    parser.add_argument('--mae_model', default='vit_base_patch16_224', type=str, metavar='MODEL',
                         help='Name of model to train')
     parser.add_argument('--tubelet_size', type=int, default= 2)
     parser.add_argument('--input_size', default=224, type=int,
@@ -126,7 +126,6 @@ def get_args():
                         help='How to apply mixup/cutmix params. Per "batch", "pair", or "elem"')
 
     # Finetuning params
-    parser.add_argument('--finetune', default='', help='finetune from checkpoint')
     parser.add_argument('--model_key', default='model|module', type=str)
     parser.add_argument('--model_prefix', default='', type=str)
     parser.add_argument('--init_scale', default=0.001, type=float)
@@ -191,6 +190,14 @@ def get_args():
     parser.add_argument('--anno_path', default=None, type=str, help='annotation path')
     parser.add_argument('--pred_type', default=None, choices=['noun', 'verb', 'action'])
     parser.add_argument('--slack_api', type=str,default=None)
+    
+    parser.add_argument('--use_clip', action='store_true')
+    parser.add_argument('--clip_frames',default=1,type=int)
+    parser.add_argument('--clip_finetune', default='', help='finetune from checkpoint')
+    
+    parser.add_argument('--use_mae', action='store_true')
+    parser.add_argument('--mae_finetune', default='', help='finetune from checkpoint')
+
     known_args, _ = parser.parse_known_args()
 
     if known_args.enable_deepspeed:
@@ -302,36 +309,40 @@ def main(args, ds_init):
             mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, cutmix_minmax=args.cutmix_minmax,
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
+        
+    if args.use_mae:
+        model = create_model(
+            args.mae_model,
+            pretrained=False,
+            num_classes=args.nb_classes,
+            all_frames=args.num_frames * args.num_segments,
+            tubelet_size=args.tubelet_size,
+            fc_drop_rate=args.fc_drop_rate,
+            drop_rate=args.drop,
+            drop_path_rate=args.drop_path,
+            attn_drop_rate=args.attn_drop_rate,
+            drop_block_rate=None,
+            use_checkpoint=args.use_checkpoint,
+            use_mean_pooling=args.use_mean_pooling,
+            init_scale=args.init_scale,
+        )
+    if args.use_clip:
+        model, _ = clip.load(args.clip_finetune,device='cuda')
+        
 
-    model = create_model(
-        args.model,
-        pretrained=False,
-        num_classes=args.nb_classes,
-        all_frames=args.num_frames * args.num_segments,
-        tubelet_size=args.tubelet_size,
-        fc_drop_rate=args.fc_drop_rate,
-        drop_rate=args.drop,
-        drop_path_rate=args.drop_path,
-        attn_drop_rate=args.attn_drop_rate,
-        drop_block_rate=None,
-        use_checkpoint=args.use_checkpoint,
-        use_mean_pooling=args.use_mean_pooling,
-        init_scale=args.init_scale,
-    )
-
-    patch_size = model.patch_embed.patch_size
+    patch_size = (model.patch_size,model.patch_size)
     print("Patch size = %s" % str(patch_size))
     args.window_size = (args.num_frames // 2, args.input_size // patch_size[0], args.input_size // patch_size[1])
     args.patch_size = patch_size
 
-    if args.finetune:
-        if args.finetune.startswith('https'):
+    if args.mae_finetune and args.use_mae:
+        if args.mae_finetune.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
-                args.finetune, map_location='cpu', check_hash=True)
+                args.mae_finetune, map_location='cpu', check_hash=True)
         else:
-            checkpoint = torch.load(args.finetune, map_location='cpu')
+            checkpoint = torch.load(args.mae_finetune, map_location='cpu')
 
-        print("Load ckpt from %s" % args.finetune)
+        print("Load ckpt from %s" % args.mae_finetune)
         checkpoint_model = None
         for model_key in args.model_key.split('|'):
             if model_key in checkpoint:

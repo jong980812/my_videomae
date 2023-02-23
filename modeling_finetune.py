@@ -204,6 +204,7 @@ class VisionTransformer(nn.Module):
             img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim, num_frames=all_frames, tubelet_size=self.tubelet_size)
         num_patches = self.patch_embed.num_patches
         self.use_checkpoint = use_checkpoint
+        self.patch_size=patch_size
 
         if use_learnable_pos_emb:
             self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
