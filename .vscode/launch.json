@@ -1,16 +1,57 @@
 {
-    // IntelliSense를 사용하여 가능한 특성에 대해 알아보세요.
-    // 기존 특성에 대한 설명을 보려면 가리킵니다.
-    // 자세한 내용을 보려면 https://go.microsoft.com/fwlink/?linkid=830387을(를) 방문하세요.
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
     "version": "0.2.0",
     "configurations": [
-        {
-            "name": "Python: 현재 파일",
-            "type": "python",
-            "request": "launch",
-            "program": "${file}",
-            "console": "integratedTerminal",
-            "justMyCode": true
-        }
+     
+         {
+              "name": "Python: Current File",
+              "type": "python",
+              "request": "launch",
+              "console": "integratedTerminal",
+              "module": "torch.distributed.launch",
+              "justMyCode": true,
+              "args" : [
+                    "--nproc_per_node", "1",
+                    "--master_port", "12340",
+                    "./run_class_finetuning.py",
+                    "--log_dir", "./debug",
+                    "--output_dir", "./debug",
+                    "--batch_size", "2",
+                    "--num_sample", "1",
+                    "--epochs", "10",
+                    "--save_ckpt_freq", "5",
+                    "--input_size", "224",
+                    "--short_side_size", "224",
+                    "--num_frames", "16",
+                    "--num_sample", "1",
+                    "--opt", "adamw",
+                    "--lr", "0.1",
+                    "--opt_betas", "0.9","0.999",
+                    "--weight_decay", "0.05",
+                    "--test_num_segment", "2",
+                    "--test_num_crop", "3",
+                    "--enable_deepspeed",
+                    "--dist_eval",
+                    //
+                    "--data_set", "EPIC",
+                    "--nb_classes", "300",
+                    "--data_path", "/local_datasets/Epickitchens100_clips/video",
+                    "--anno_path", "./dataset/epic",
+                    "--pred_type","noun",
+                    "--ffn", "locality",
+                    //
+                    "--use_clip",
+                    "--clip_finetune","./clip_model/ViT-B-16.pt",
+                    "--clip_frames","16",
+                    //
+                    // "--use_mae",
+                    "--mae_model", "vit_base_patch16_224",
+                    "--mae_finetune", "./dataset/epic/epic_checkpoint-800.pth",
+                    // "--eval"
+
+              ]
+         }
     ]
 }

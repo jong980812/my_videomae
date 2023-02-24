@@ -328,7 +328,7 @@ def main(args, ds_init):
             init_scale=args.init_scale,
         )
     if args.use_clip:
-        model, _ = clip.load(args.clip_finetune,device='cuda')
+        model, _ = clip.load(args.clip_finetune,device='cuda',args=args)
         
 
     patch_size = (model.patch_size,model.patch_size)

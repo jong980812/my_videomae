@@ -6,7 +6,83 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from einops import rearrange
+class h_sigmoid(nn.Module):
+    def __init__(self, inplace=True):
+        super(h_sigmoid, self).__init__()
+        self.relu = nn.ReLU6(inplace=inplace)
 
+    def forward(self, x):
+        return self.relu(x + 3) / 6
+
+
+class h_swish(nn.Module):
+    def __init__(self, inplace=True):
+        super(h_swish, self).__init__()
+        self.sigmoid = h_sigmoid(inplace=inplace)
+
+    def forward(self, x):
+        return x * self.sigmoid(x)
+
+class LocalityFeedForward(nn.Module):
+    def __init__(self, in_dim=768, out_dim=768, stride=1, expand_ratio=4., act='hs+se', reduction=4,
+                 wo_dp_conv=False, dp_first=False):
+        """
+        :param in_dim: the input dimension
+        :param out_dim: the output dimension. The input and output dimension should be the same.
+        :param stride: stride of the depth-wise convolution.
+        :param expand_ratio: expansion ratio of the hidden dimension.
+        :param act: the activation function.
+                    relu: ReLU
+                    hs: h_swish
+                    hs+se: h_swish and SE module
+                    hs+eca: h_swish and ECA module
+                    hs+ecah: h_swish and ECA module. Compared with eca, h_sigmoid is used.
+        :param reduction: reduction rate in SE module.
+        :param wo_dp_conv: without depth-wise convolution.
+        :param dp_first: place depth-wise convolution as the first layer.
+        """
+        super(LocalityFeedForward, self).__init__()
+        hidden_dim = int(in_dim * expand_ratio)
+        kernel_size = 3
+
+        layers = []
+        # the first linear layer is replaced by 1x1 convolution.
+        layers.extend([
+            nn.Conv2d(in_dim, hidden_dim, 1, 1, 0, bias=False),
+            nn.BatchNorm2d(hidden_dim),
+            h_swish() if act.find('hs') >= 0 else nn.ReLU6(inplace=True)])
+
+        # the depth-wise convolution between the two linear layers
+        if not wo_dp_conv:
+            dp = [
+                nn.Conv2d(hidden_dim, hidden_dim, kernel_size, stride, kernel_size // 2, groups=hidden_dim, bias=False),
+                nn.BatchNorm2d(hidden_dim),
+                h_swish() if act.find('hs') >= 0 else nn.ReLU6(inplace=True)
+            ]
+            if dp_first:
+                layers = dp + layers
+            else:
+                layers.extend(dp)
+
+        # if act.find('+') >= 0:
+        #     attn = act.split('+')[1]
+        #     if attn == 'se':
+        #         layers.append(SELayer(hidden_dim, reduction=reduction))
+        #     elif attn.find('eca') >= 0:
+        #         layers.append(ECALayer(hidden_dim, sigmoid=attn == 'eca'))
+        #     else:
+        #         raise NotImplementedError('Activation type {} is not implemented'.format(act))
+
+        # the second linear layer is replaced by 1x1 convolution.
+        layers.extend([
+            nn.Conv2d(hidden_dim, out_dim, 1, 1, 0, bias=False),
+            nn.BatchNorm2d(out_dim)
+        ])
+        self.conv = nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = x + self.conv(x)
+        return x
 
 class Bottleneck(nn.Module):
     expansion = 4
@@ -173,18 +249,22 @@ class QuickGELU(nn.Module):
 
 
 class ResidualAttentionBlock(nn.Module):
-    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None):
+    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None, ffn:str='mlp'):
         super().__init__()
 
         self.attn = nn.MultiheadAttention(d_model, n_head)
+        self.attn_mask=attn_mask
         self.ln_1 = LayerNorm(d_model)
-        self.mlp = nn.Sequential(OrderedDict([
-            ("c_fc", nn.Linear(d_model, d_model * 4)),
-            ("gelu", QuickGELU()),
-            ("c_proj", nn.Linear(d_model * 4, d_model))
-        ]))
-        self.ln_2 = LayerNorm(d_model)
-        self.attn_mask = attn_mask
+        self.ffn=ffn
+        if ffn == 'mlp':
+            self.mlp = nn.Sequential(OrderedDict([
+                ("c_fc", nn.Linear(d_model, d_model * 4)),
+                ("gelu", QuickGELU()),
+                ("c_proj", nn.Linear(d_model * 4, d_model))
+            ]))
+            self.ln_2 = LayerNorm(d_model)
+        elif ffn == 'locality':
+            self.locality_ffn = LocalityFeedForward(d_model,d_model,1,4,act='hs')
 
     def attention(self, x: torch.Tensor):
         self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
@@ -192,16 +272,28 @@ class ResidualAttentionBlock(nn.Module):
 
     def forward(self, x):
         x = x + self.attention(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
+        if self.ffn == 'mlp':
+            x = x + self.mlp(self.ln_2(x))
+        else:
+            x = x.transpose(0,1)                                #!n,b,d --> b,n,d
+            b,n,d= x.shape
+            #?b: batch size n: token len d: token dim
+            
+            cls_token, x = torch.split(x, [1, n-1],dim=1)       #! (b,1,d), (b,196,d)
+            x = x.transpose(1,2).view(b,d,14,14)                #! (b, d, 14,14)
+            
+            x = self.locality_ffn(x).flatten(2).transpose(1,2)  #!(b,196,d)
+            x = torch.cat([cls_token, x], dim=1)                #!(b,197,d)
+            x = x.transpose(0,1)                                #!(n,b,d)
         return x
 
 
 class Transformer(nn.Module):
-    def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None):
+    def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None, ffn: str = 'mlp'):
         super().__init__()
         self.width = width
         self.layers = layers
-        self.resblocks = nn.ModuleList([ResidualAttentionBlock(width, heads, attn_mask) for _ in range(layers)])
+        self.resblocks = nn.ModuleList([ResidualAttentionBlock(width, heads, attn_mask,ffn=ffn) for _ in range(layers)])
 
     def forward(self, x: torch.Tensor):
         for blk in self.resblocks:
@@ -210,7 +302,7 @@ class Transformer(nn.Module):
 
 
 class VisionTransformer(nn.Module):
-    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int):
+    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int,ffn: str = 'mlp'):
         super().__init__()
         self.input_resolution = input_resolution
         self.conv1 = nn.Conv2d(in_channels=3, out_channels=width, kernel_size=patch_size, stride=patch_size, bias=False)
@@ -219,7 +311,7 @@ class VisionTransformer(nn.Module):
         self.positional_embedding = nn.Parameter(scale * torch.randn((input_resolution // patch_size) ** 2 + 1, width))
         self.ln_pre = LayerNorm(width)
 
-        self.transformer = Transformer(width, layers, heads)
+        self.transformer = Transformer(width, layers, heads,ffn=ffn)
 
         self.ln_post = LayerNorm(width)
         
@@ -247,8 +339,6 @@ class VisionTransformer(nn.Module):
         
         if fusion:
             x = rearrange(x, '(b t) n d -> b t n d', t=t)
-
-        if fusion:
             x = self.ln_post(x[:, :, 0, :])
             x = x.mean(dim=1)
         else:
@@ -264,6 +354,8 @@ class CLIP(nn.Module):
                  vision_layers: Union[Tuple[int, int, int, int], int],
                  vision_width: int,
                  vision_patch_size: int,
+                 ffn: str = 'mlp',
+                 nb_classes:int = 300,
                  ):
         super().__init__()
         self.patch_size=vision_patch_size
@@ -274,9 +366,10 @@ class CLIP(nn.Module):
             patch_size=vision_patch_size,
             width=vision_width,
             layers=vision_layers,
-            heads=vision_heads,)
+            heads=vision_heads,
+            ffn=ffn)
         
-        self.head = nn.Linear(vision_width, 300) # 수동으로 class 수 맞춰줘야함 load엑서 변수가 통제되어있음
+        self.head = nn.Linear(vision_width, nb_classes) # 수동으로 class 수 맞춰줘야함 load엑서 변수가 통제되어있음
 
         self.initialize_parameters()
         
@@ -323,7 +416,7 @@ def convert_weights(model: nn.Module):
     """Convert applicable model parameters to fp16"""
 
     def _convert_weights_to_fp16(l):
-        if isinstance(l, (nn.Conv1d, nn.Conv2d, nn.Linear)):
+        if isinstance(l, (nn.Conv1d, nn.Conv2d, nn.Linear,nn.BatchNorm2d)):
             l.weight.data = l.weight.data.half()
             if l.bias is not None:
                 l.bias.data = l.bias.data.half()
@@ -343,17 +436,24 @@ def convert_weights(model: nn.Module):
     model.apply(_convert_weights_to_fp16)
 
 
-def build_model(state_dict: dict):
+def build_model(state_dict: dict,args=None):
     
     vision_width = state_dict["visual.conv1.weight"].shape[0]
     vision_layers = len([k for k in state_dict.keys() if k.startswith("visual.") and k.endswith(".attn.in_proj_weight")])
     vision_patch_size = state_dict["visual.conv1.weight"].shape[-1]
     grid_size = round((state_dict["visual.positional_embedding"].shape[0] - 1) ** 0.5)
     image_resolution = vision_patch_size * grid_size
-
+    #!!!!!!!!!!!!!!!!!!!!!!!!
+    if args is not None:
+        ffn = args.ffn
+        nb_classes=args.nb_classes
+    else:#!My hard coding
+        ffn = 'locality'
+        nb_classes=300
+    #!!!!!!!!!!!!!!!!!!!!!!!!!!
 
     model = CLIP(
-        image_resolution, vision_layers, vision_width, vision_patch_size
+        image_resolution, vision_layers, vision_width, vision_patch_size,ffn=ffn,nb_classes=nb_classes
     )
 
     for key in ["input_resolution", "context_length", "vocab_size"]:
