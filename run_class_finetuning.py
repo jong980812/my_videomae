@@ -194,7 +194,7 @@ def get_args():
     parser.add_argument('--use_clip', action='store_true')
     parser.add_argument('--clip_frames',default=1,type=int)
     parser.add_argument('--clip_finetune', default='', help='finetune from checkpoint')
-    
+    parser.add_argument('--ffn',default='mlp',type=str)
     parser.add_argument('--use_mae', action='store_true')
     parser.add_argument('--mae_finetune', default='', help='finetune from checkpoint')
     parser.add_argument('--freeze_layers', default=None, nargs='+', type=str)
