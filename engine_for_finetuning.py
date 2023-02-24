@@ -152,7 +152,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
 
 @torch.no_grad()
-def validation_one_epoch(data_loader, model, device):
+def validation_one_epoch(data_loader, model, device,args):
     criterion = torch.nn.CrossEntropyLoss()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -166,7 +166,17 @@ def validation_one_epoch(data_loader, model, device):
         target = batch[1]
         videos = videos.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
-
+        #!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        num_frames=args.num_frames
+        if args.use_clip:#!center frame
+            if args.clip_frames == 1:
+                # print("Using center Frame in Spatial path")
+                videos = videos[:,:,num_frames//2,:,:].to(device,non_blocking=True)
+            elif args.clip_frames == num_frames:
+                # print("Using all frame in Spatial path")
+                videos=videos 
+            videos=videos.half()
+        #!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         # compute output
         with torch.cuda.amp.autocast():
             output = model(videos)
@@ -188,7 +198,7 @@ def validation_one_epoch(data_loader, model, device):
 
 
 @torch.no_grad()
-def final_test(data_loader, model, device, file):
+def final_test(data_loader, model, device, file,args):
     criterion = torch.nn.CrossEntropyLoss()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -206,7 +216,17 @@ def final_test(data_loader, model, device, file):
         split_nb = batch[4]
         videos = videos.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
-
+        #!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+        num_frames=args.num_frames
+        if args.use_clip:#!center frame
+            if args.clip_frames == 1:
+                # print("Using center Frame in Spatial path")
+                videos = videos[:,:,num_frames//2,:,:].to(device,non_blocking=True)
+            elif args.clip_frames == num_frames:
+                # print("Using all frame in Spatial path")
+                videos=videos 
+            videos=videos.half()
+        #!!!!!!!!!!!!!!!!!!!!!!!!!!!!
         # compute output
         with torch.cuda.amp.autocast():
             output = model(videos)

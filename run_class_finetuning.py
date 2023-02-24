@@ -491,7 +491,7 @@ def main(args, ds_init):
 
     if args.eval:
         preds_file = os.path.join(args.output_dir, str(global_rank) + '.txt')
-        test_stats = final_test(data_loader_test, model, device, preds_file)
+        test_stats = final_test(data_loader_test, model, device, preds_file,args)
         torch.distributed.barrier()
         if global_rank == 0:
             print("Start merging results...")
@@ -526,7 +526,7 @@ def main(args, ds_init):
                     args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                     loss_scaler=loss_scaler, epoch=epoch, model_ema=model_ema)
         if data_loader_val is not None:
-            test_stats = validation_one_epoch(data_loader_val, model, device)
+            test_stats = validation_one_epoch(data_loader_val, model, device,args=args)
             print(f"Accuracy of the network on the {len(dataset_val)} val videos: {test_stats['acc1']:.1f}%")
             if max_accuracy < test_stats["acc1"]:
                 max_accuracy = test_stats["acc1"]
@@ -556,7 +556,7 @@ def main(args, ds_init):
                 f.write(json.dumps(log_stats) + "\n")
 
     preds_file = os.path.join(args.output_dir, str(global_rank) + '.txt')
-    test_stats = final_test(data_loader_test, model, device, preds_file)
+    test_stats = final_test(data_loader_test, model, device, preds_file,args=args)
     torch.distributed.barrier()
     if global_rank == 0:
         print("Start merging results...")
