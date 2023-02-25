@@ -40,11 +40,11 @@
                     "--data_path", "/local_datasets/Epickitchens100_clips/video",
                     "--anno_path", "./dataset/epic",
                     "--pred_type","noun",
-                    "--ffn", "locality",
+                    "--ffn", "locality_v2",
                     //
                     "--use_clip",
                     "--clip_finetune","./clip_model/ViT-B-16.pt",
-                    "--clip_frames","16",
+                    "--clip_frames","1",
                     //
                     // "--use_mae",
                     "--mae_model", "vit_base_patch16_224",

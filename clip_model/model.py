@@ -256,16 +256,25 @@ class ResidualAttentionBlock(nn.Module):
         self.attn_mask=attn_mask
         self.ln_1 = LayerNorm(d_model)
         self.ffn=ffn
+        self.ln_2 = LayerNorm(d_model)
         if ffn == 'mlp':
-            self.mlp = nn.Sequential(OrderedDict([
+            self.mlps = nn.Sequential(OrderedDict([
                 ("c_fc", nn.Linear(d_model, d_model * 4)),
                 ("gelu", QuickGELU()),
                 ("c_proj", nn.Linear(d_model * 4, d_model))
             ]))
-            self.ln_2 = LayerNorm(d_model)
         elif ffn == 'locality':
             self.locality_ffn = LocalityFeedForward(d_model,d_model,1,4,act='hs')
-
+        elif ffn == 'locality_v2':
+            kernel_size=5
+            self.mlp = nn.Sequential(OrderedDict([
+                ("c_fc", nn.Linear(d_model, d_model * 4)),
+                ("gelu", QuickGELU()),
+                ("locality",nn.Conv2d(d_model*4, d_model*4, kernel_size=kernel_size, stride=1, padding= kernel_size// 2, groups=d_model, bias=False)),
+                ("gelu_2", QuickGELU()),
+                ("BN",nn.BatchNorm2d(d_model*4)),
+                ("c_proj", nn.Linear(d_model * 4, d_model))
+            ]))
     def attention(self, x: torch.Tensor):
         self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
         return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
@@ -274,7 +283,7 @@ class ResidualAttentionBlock(nn.Module):
         x = x + self.attention(self.ln_1(x))
         if self.ffn == 'mlp':
             x = x + self.mlp(self.ln_2(x))
-        else:
+        elif self.ffn == 'locality':
             x = x.transpose(0,1)                                #!n,b,d --> b,n,d
             b,n,d= x.shape
             #?b: batch size n: token len d: token dim
@@ -285,6 +294,20 @@ class ResidualAttentionBlock(nn.Module):
             x = self.locality_ffn(x).flatten(2).transpose(1,2)  #!(b,196,d)
             x = torch.cat([cls_token, x], dim=1)                #!(b,197,d)
             x = x.transpose(0,1)                                #!(n,b,d)
+        elif self.ffn == 'locality_v2':
+            origin = x
+            x = self.ln_2(x)
+            x = self.mlp[0](x)# Linear dimi -> 4*dim
+            x = self.mlp[1](x)# GELU
+            x = x.transpose(0,1)                                #!n,b,d --> b,n,d
+            b,n,d= x.shape
+            #?b: batch size n: token len d: token dim
+            cls_token, x = torch.split(x, [1, n-1],dim=1)       #! (b,1,d), (b,196,d)
+            x = x.transpose(1,2).view(b,d,14,14)
+            x = (x + self.mlp[4](self.mlp[3](self.mlp[2](x)))).flatten(2).transpose(1,2)
+            x = torch.cat([cls_token, x], dim=1) 
+            x = x.transpose(0,1)
+            x = origin + self.mlp[5](x)
         return x
 
 
