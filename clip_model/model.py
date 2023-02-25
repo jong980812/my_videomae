@@ -249,16 +249,20 @@ class QuickGELU(nn.Module):
 
 
 class ResidualAttentionBlock(nn.Module):
-    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None, ffn:str='mlp'):
+    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None, ffn:str='mlp',use_time_attn :bool = False,frames:int = 1):
         super().__init__()
-
+        self.use_time_attn=use_time_attn#!!!!
+        self.ffn=ffn#!!!!
+        self.frames = frames
         self.attn = nn.MultiheadAttention(d_model, n_head)
         self.attn_mask=attn_mask
+        if self.use_time_attn:
+            self.time_attn = nn.MultiheadAttention(d_model,n_head)  
         self.ln_1 = LayerNorm(d_model)
-        self.ffn=ffn
         self.ln_2 = LayerNorm(d_model)
+        self.ln_time = LayerNorm(d_model)
         if ffn == 'mlp':
-            self.mlps = nn.Sequential(OrderedDict([
+            self.mlp = nn.Sequential(OrderedDict([
                 ("c_fc", nn.Linear(d_model, d_model * 4)),
                 ("gelu", QuickGELU()),
                 ("c_proj", nn.Linear(d_model * 4, d_model))
@@ -278,9 +282,17 @@ class ResidualAttentionBlock(nn.Module):
     def attention(self, x: torch.Tensor):
         self.attn_mask = self.attn_mask.to(dtype=x.dtype, device=x.device) if self.attn_mask is not None else None
         return self.attn(x, x, x, need_weights=False, attn_mask=self.attn_mask)[0]
-
+    def time_attention(self, x:torch.Tensor):
+        return self.time_attn(x,x,x,need_weights=False,attn_mask=None)[0]
+    
     def forward(self, x):
+        l,n,d=x.shape
+        batch_size=n//self.frames
         x = x + self.attention(self.ln_1(x))
+        if self.use_time_attn:
+            x = rearrange(x, 'l (b t) d -> t (b l) d',t=self.frames)#!16, 392, 768
+            x = x + self.time_attention(self.ln_time(x))
+            x = rearrange(x, 't (b l) d -> l (b t) d',l=l,d=d,b=batch_size,t=self.frames)#!L,N,D
         if self.ffn == 'mlp':
             x = x + self.mlp(self.ln_2(x))
         elif self.ffn == 'locality':
@@ -312,11 +324,11 @@ class ResidualAttentionBlock(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None, ffn: str = 'mlp'):
+    def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None, ffn: str = 'mlp', use_time_attn = False,frames = 1):
         super().__init__()
         self.width = width
         self.layers = layers
-        self.resblocks = nn.ModuleList([ResidualAttentionBlock(width, heads, attn_mask,ffn=ffn) for _ in range(layers)])
+        self.resblocks = nn.ModuleList([ResidualAttentionBlock(width, heads, attn_mask,ffn=ffn, use_time_attn=use_time_attn,frames=frames) for _ in range(layers)])
 
     def forward(self, x: torch.Tensor):
         for blk in self.resblocks:
@@ -325,16 +337,20 @@ class Transformer(nn.Module):
 
 
 class VisionTransformer(nn.Module):
-    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int,ffn: str = 'mlp'):
+    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int,ffn: str = 'mlp',use_time_attn: bool = False,frames:int = 1):
         super().__init__()
+        self.frames=frames#!
+        self.use_time_attn=use_time_attn#!
         self.input_resolution = input_resolution
         self.conv1 = nn.Conv2d(in_channels=3, out_channels=width, kernel_size=patch_size, stride=patch_size, bias=False)
         scale = width ** -0.5
         self.class_embedding = nn.Parameter(scale * torch.randn(width))
-        self.positional_embedding = nn.Parameter(scale * torch.randn((input_resolution // patch_size) ** 2 + 1, width))
+        self.positional_embedding = nn.Parameter(scale * torch.randn((input_resolution // patch_size) ** 2 + 1, width))#197,768
+        if frames != 1:#! not 1 frame.
+            self.time_positional_embedding = nn.Parameter(scale * torch.randn(1,frames,1, width))
         self.ln_pre = LayerNorm(width)
 
-        self.transformer = Transformer(width, layers, heads,ffn=ffn)
+        self.transformer = Transformer(width, layers, heads,ffn=ffn, use_time_attn=use_time_attn,frames=frames)
 
         self.ln_post = LayerNorm(width)
         
@@ -354,8 +370,12 @@ class VisionTransformer(nn.Module):
         x = x.permute(0, 2, 1)  # shape = [*, grid ** 2, width]
         x = torch.cat([self.class_embedding.to(x.dtype) + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device), x], dim=1)  # shape = [*, grid ** 2 + 1, width]
         x = x + self.positional_embedding.to(x.dtype)
+        if self.use_time_attn:
+            _,l,d= x.shape
+            x = rearrange(x,'(b t) l d -> b t l d',b=b,t=t)#! 2, 16, 197, 768
+            x = x + self.time_positional_embedding.to(x.dtype)
+            x = rearrange(x,'b t l d -> (b t) l d',b=b,t=t)
         x = self.ln_pre(x)
-
         x = x.permute(1, 0, 2)  # NLD -> LND
         x = self.transformer(x)
         x = x.permute(1, 0, 2)  # LND -> NLD
@@ -379,6 +399,8 @@ class CLIP(nn.Module):
                  vision_patch_size: int,
                  ffn: str = 'mlp',
                  nb_classes:int = 300,
+                 time_attn = False,
+                 frames:int = 1,
                  ):
         super().__init__()
         self.patch_size=vision_patch_size
@@ -390,7 +412,9 @@ class CLIP(nn.Module):
             width=vision_width,
             layers=vision_layers,
             heads=vision_heads,
-            ffn=ffn)
+            ffn=ffn,
+            use_time_attn=time_attn,
+            frames=frames)
         
         self.head = nn.Linear(vision_width, nb_classes) # 수동으로 class 수 맞춰줘야함 load엑서 변수가 통제되어있음
 
@@ -470,13 +494,15 @@ def build_model(state_dict: dict,args=None):
     if args is not None:
         ffn = args.ffn
         nb_classes=args.nb_classes
+        use_clip_time_attn = args.use_clip_time_attn
+        num_frames=args.num_frames
     else:#!My hard coding
         ffn = 'locality'
         nb_classes=300
     #!!!!!!!!!!!!!!!!!!!!!!!!!!
 
     model = CLIP(
-        image_resolution, vision_layers, vision_width, vision_patch_size,ffn=ffn,nb_classes=nb_classes
+        image_resolution, vision_layers, vision_width, vision_patch_size,ffn=ffn,nb_classes=nb_classes, time_attn=use_clip_time_attn, frames=num_frames
     )
 
     for key in ["input_resolution", "context_length", "vocab_size"]:
