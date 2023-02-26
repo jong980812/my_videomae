@@ -13,12 +13,12 @@
               "module": "torch.distributed.launch",
               "justMyCode": true,
               "args" : [
-                    "--nproc_per_node", "4",
+                    "--nproc_per_node", "1",
                     "--master_port", "12340",
                     "./run_class_finetuning.py",
                     "--log_dir", "./debug",
                     "--output_dir", "./debug",
-                    "--batch_size", "8",
+                    "--batch_size", "10",
                     "--num_sample", "1",
                     "--epochs", "10",
                     "--save_ckpt_freq", "5",
@@ -35,21 +35,21 @@
                     "--enable_deepspeed",
                     "--dist_eval",
                     //
-                    "--data_set", "EPIC",
-                    "--nb_classes", "300",
+                    "--data_set", "DIVING48",
+                    "--nb_classes", "48",
                     "--data_path", "/local_datasets/Epickitchens100_clips/video",
-                    "--anno_path", "./dataset/epic",
-                    "--pred_type","noun",
+                    "--anno_path", "./dataset/diving48",
+                    "--pred_type","verb",
                     "--ffn", "mlp",
                     //
-                    "--use_clip",
-                    "--clip_finetune","./clip_model/ViT-B-16.pt",
-                    "--clip_frames","16",
-                    "--use_clip_time_attn",
+                    // "--use_clip",
+                    // "--clip_finetune","./clip_model/ViT-B-16.pt",
+                    // "--clip_frames","16",
+                    // "--use_clip_time_attn",
                     //
-                    // "--use_mae",
+                    "--use_mae",
                     "--mae_model", "vit_base_patch16_224",
-                    "--mae_finetune", "./dataset/epic/epic_checkpoint-800.pth",
+                    "--mae_finetune", "dataset/kinetics400/kinetics400_pretrain.pth",
                     // "--eval"
 
               ]

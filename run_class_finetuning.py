@@ -146,7 +146,7 @@ def get_args():
     parser.add_argument('--num_segments', type=int, default= 1)
     parser.add_argument('--num_frames', type=int, default= 16)
     parser.add_argument('--sampling_rate', type=int, default= 4)
-    parser.add_argument('--data_set', default='Kinetics-400', choices=['EPIC','Kinetics-400', 'SSV2', 'UCF101', 'HMDB51','image_folder'],
+    parser.add_argument('--data_set', default='Kinetics-400', choices=['DIVING48','EPIC','Kinetics-400', 'SSV2', 'UCF101', 'HMDB51','image_folder'],
                         type=str, help='dataset')
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
@@ -200,6 +200,8 @@ def get_args():
     parser.add_argument('--mae_finetune', default='', help='finetune from checkpoint')
     parser.add_argument('--freeze_layers', default=None, nargs='+', type=str)
     parser.add_argument('--unfreeze_layers', default=None, nargs='+', type=str)
+
+    parser.add_argument('--use_two_model', action='store_true')
 
     known_args, _ = parser.parse_known_args()
 
@@ -313,7 +315,7 @@ def main(args, ds_init):
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
         
-    if args.use_mae:
+    if args.use_mae and not args.use_two_model:
         model = create_model(
             args.mae_model,
             pretrained=False,
@@ -329,10 +331,27 @@ def main(args, ds_init):
             use_mean_pooling=args.use_mean_pooling,
             init_scale=args.init_scale,
         )
-    if args.use_clip:
+    if args.use_clip and not args.use_two_model:
         model, _ = clip.load(args.clip_finetune,device='cuda',args=args)
-        
-
+    
+    if args.use_two_model:#! Video mae, CLIP
+        model_mae = create_model(
+            args.mae_model,
+            pretrained=False,
+            num_classes=args.nb_classes,
+            all_frames=args.num_frames * args.num_segments,
+            tubelet_size=args.tubelet_size,
+            fc_drop_rate=args.fc_drop_rate,
+            drop_rate=args.drop,
+            drop_path_rate=args.drop_path,
+            attn_drop_rate=args.attn_drop_rate,
+            drop_block_rate=None,
+            use_checkpoint=args.use_checkpoint,
+            use_mean_pooling=args.use_mean_pooling,
+            init_scale=args.init_scale,
+        )
+        model_clip, _ = clip.load(args.clip_finetune,device='cuda',args=args)
+        pass
     patch_size = (model.patch_size,model.patch_size)
     print("Patch size = %s" % str(patch_size))
     args.window_size = (args.num_frames // 2, args.input_size // patch_size[0], args.input_size // patch_size[1])
