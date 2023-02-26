@@ -511,4 +511,12 @@ def build_model(state_dict: dict,args=None):
 
     convert_weights(model)
     model.load_state_dict(state_dict, strict=False)
+    if args.use_clip_time_attn:
+        with torch.no_grad():
+            for i in range(12):
+                model.visual.transformer.resblocks[i].time_attn.out_proj.weight.copy_(model.visual.transformer.resblocks[i].attn.out_proj.weight)
+                model.visual.transformer.resblocks[i].time_attn.out_proj.bias.copy_(model.visual.transformer.resblocks[i].attn.out_proj.bias)
+                model.visual.transformer.resblocks[i].ln_time.weight.copy_(model.visual.transformer.resblocks[i].ln_1.weight)
+                model.visual.transformer.resblocks[i].ln_time.bias.copy_(model.visual.transformer.resblocks[i].ln_1.bias)
+        print("Time Attention module initialize same with self.attn")
     return model

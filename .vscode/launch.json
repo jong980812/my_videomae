@@ -35,21 +35,21 @@
                     "--enable_deepspeed",
                     "--dist_eval",
                     //
-                    "--data_set", "DIVING48",
-                    "--nb_classes", "48",
+                    "--data_set", "EPIC",
+                    "--nb_classes", "300",
                     "--data_path", "/local_datasets/Epickitchens100_clips/video",
-                    "--anno_path", "./dataset/diving48",
-                    "--pred_type","verb",
+                    "--anno_path", "./dataset/epic",
+                    "--pred_type","noun",
                     "--ffn", "mlp",
                     //
-                    // "--use_clip",
-                    // "--clip_finetune","./clip_model/ViT-B-16.pt",
-                    // "--clip_frames","16",
-                    // "--use_clip_time_attn",
+                    "--use_clip",
+                    "--clip_finetune","./clip_model/ViT-B-16.pt",
+                    "--clip_frames","16",
+                    "--use_clip_time_attn",
                     //
-                    "--use_mae",
-                    "--mae_model", "vit_base_patch16_224",
-                    "--mae_finetune", "dataset/kinetics400/kinetics400_pretrain.pth",
+                    // "--use_mae",
+                    // "--mae_model", "vit_base_patch16_224",
+                    // "--mae_finetune", "dataset/kinetics400/kinetics400_pretrain.pth",
                     // "--eval"
 
               ]
