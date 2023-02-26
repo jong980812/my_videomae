@@ -258,9 +258,9 @@ class ResidualAttentionBlock(nn.Module):
         self.attn_mask=attn_mask
         if self.use_time_attn:
             self.time_attn = nn.MultiheadAttention(d_model,n_head)  
+            self.ln_time = LayerNorm(d_model)
         self.ln_1 = LayerNorm(d_model)
         self.ln_2 = LayerNorm(d_model)
-        self.ln_time = LayerNorm(d_model)
         if ffn == 'mlp':
             self.mlp = nn.Sequential(OrderedDict([
                 ("c_fc", nn.Linear(d_model, d_model * 4)),
