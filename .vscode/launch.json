@@ -18,7 +18,7 @@
                     "./run_class_finetuning.py",
                     "--log_dir", "./debug",
                     "--output_dir", "./debug",
-                    "--batch_size", "10",
+                    "--batch_size", "8",
                     "--num_sample", "1",
                     "--epochs", "10",
                     "--save_ckpt_freq", "5",
@@ -46,6 +46,7 @@
                     "--clip_finetune","./clip_model/ViT-B-16.pt",
                     "--clip_frames","16",
                     "--use_clip_time_attn",
+                    "--use_adapter",
                     //
                     // "--use_mae",
                     // "--mae_model", "vit_base_patch16_224",

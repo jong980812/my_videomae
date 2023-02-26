@@ -200,8 +200,8 @@ def get_args():
     parser.add_argument('--mae_finetune', default='', help='finetune from checkpoint')
     parser.add_argument('--freeze_layers', default=None, nargs='+', type=str)
     parser.add_argument('--unfreeze_layers', default=None, nargs='+', type=str)
-
     parser.add_argument('--use_two_model', action='store_true')
+    parser.add_argument('--use_adapter', action='store_true')
 
     known_args, _ = parser.parse_known_args()
 

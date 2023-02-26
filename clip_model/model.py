@@ -6,6 +6,25 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 from einops import rearrange
+class Adapter(nn.Module):
+    def __init__(self, D_features, mlp_ratio=0.25, act_layer=nn.GELU, skip_connect=True):
+        super().__init__()
+        self.skip_connect = skip_connect
+        D_hidden_features = int(D_features * mlp_ratio)
+        self.act = act_layer()
+        self.D_fc1 = nn.Linear(D_features, D_hidden_features)
+        self.D_fc2 = nn.Linear(D_hidden_features, D_features)
+        
+    def forward(self, x):
+        # x is (BT, HW+1, D)
+        xs = self.D_fc1(x)
+        xs = self.act(xs)
+        xs = self.D_fc2(xs)
+        if self.skip_connect:
+            x = x + xs
+        else:
+            x = xs
+        return x
 class h_sigmoid(nn.Module):
     def __init__(self, inplace=True):
         super(h_sigmoid, self).__init__()
@@ -249,17 +268,35 @@ class QuickGELU(nn.Module):
 
 
 class ResidualAttentionBlock(nn.Module):
-    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None, ffn:str='mlp',use_time_attn :bool = False,frames:int = 1):
+    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None, ffn:str='mlp',use_time_attn :bool = False,frames:int = 1,use_adapter=False):
         super().__init__()
-        self.use_time_attn=use_time_attn#!!!!
-        self.ffn=ffn#!!!!
+        """
+        self.time_attn == self.attn
+        self.ln_1 == self.ln_time
+        """
+        ########! Utility ######! 
+        self.use_time_attn=use_time_attn
+        self.use_adapter = use_adapter
+        self.ffn=ffn
         self.frames = frames
+        ########################!
+        
+        assert self.use_adapter == (self.ffn=='mlp')
+        ########! Adapter ######! 
+        if self.use_adapter:
+            self.MLP_adapter = Adapter(d_model, skip_connect=False)
+            self.S_adapter = Adapter(d_model)
+            self.T_adapter = Adapter(d_model, skip_connect=False)
+        ########################!
+        
+        self.ln_1 = LayerNorm(d_model)
         self.attn = nn.MultiheadAttention(d_model, n_head)
         self.attn_mask=attn_mask
+        ########! T_MSA ######! 
         if self.use_time_attn:
             self.time_attn = nn.MultiheadAttention(d_model,n_head)  
             self.ln_time = LayerNorm(d_model)
-        self.ln_1 = LayerNorm(d_model)
+        #######################!
         self.ln_2 = LayerNorm(d_model)
         if ffn == 'mlp':
             self.mlp = nn.Sequential(OrderedDict([
@@ -288,13 +325,25 @@ class ResidualAttentionBlock(nn.Module):
     def forward(self, x):
         l,n,d=x.shape
         batch_size=n//self.frames
-        x = x + self.attention(self.ln_1(x))
+        if self.use_adapter:
+            x = x + self.S_adapter(self.attention(self.ln_1(x)))
+        else:
+            x = x + self.attention(self.ln_1(x))#!Original path
         if self.use_time_attn:
-            x = rearrange(x, 'l (b t) d -> t (b l) d',t=self.frames)#!16, 392, 768
-            x = x + self.time_attention(self.ln_time(x))
-            x = rearrange(x, 't (b l) d -> l (b t) d',l=l,d=d,b=batch_size,t=self.frames)#!L,N,D
+            xt = rearrange(x, 'l (b t) d -> t (b l) d',t=self.frames)#!
+            if self.use_adapter:
+                xt =self.T_adapter(self.time_attention(self.ln_time(xt)))
+            else: 
+                xt =self.time_attention(self.ln_time(xt))
+            xt = rearrange(xt, 't (b l) d -> l (b t) d',l=l,d=d,b=batch_size,t=self.frames)#!L,N,D
+        x = x + xt
+        
         if self.ffn == 'mlp':
-            x = x + self.mlp(self.ln_2(x))
+            if self.use_adapter:
+                xn = self.ln_2(x)
+                x = x + self.mlp(xn) + self.MLP_adapter(xn)
+            else:
+                x = x + self.mlp(self.ln_2(x))#!Original path
         elif self.ffn == 'locality':
             x = x.transpose(0,1)                                #!n,b,d --> b,n,d
             b,n,d= x.shape
@@ -324,11 +373,11 @@ class ResidualAttentionBlock(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None, ffn: str = 'mlp', use_time_attn = False,frames = 1):
+    def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None, ffn: str = 'mlp', use_time_attn = False,frames = 1,use_adapter=False):
         super().__init__()
         self.width = width
         self.layers = layers
-        self.resblocks = nn.ModuleList([ResidualAttentionBlock(width, heads, attn_mask,ffn=ffn, use_time_attn=use_time_attn,frames=frames) for _ in range(layers)])
+        self.resblocks = nn.ModuleList([ResidualAttentionBlock(width, heads, attn_mask,ffn=ffn, use_time_attn=use_time_attn,frames=frames,use_adapter=use_adapter) for _ in range(layers)])
 
     def forward(self, x: torch.Tensor):
         for blk in self.resblocks:
@@ -337,7 +386,7 @@ class Transformer(nn.Module):
 
 
 class VisionTransformer(nn.Module):
-    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int,ffn: str = 'mlp',use_time_attn: bool = False,frames:int = 1):
+    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int,ffn: str = 'mlp',use_time_attn: bool = False,frames:int = 1, use_adapter=False):
         super().__init__()
         self.frames=frames#!
         self.use_time_attn=use_time_attn#!
@@ -350,7 +399,7 @@ class VisionTransformer(nn.Module):
             self.time_positional_embedding = nn.Parameter(scale * torch.randn(1,frames,1, width))
         self.ln_pre = LayerNorm(width)
 
-        self.transformer = Transformer(width, layers, heads,ffn=ffn, use_time_attn=use_time_attn,frames=frames)
+        self.transformer = Transformer(width, layers, heads,ffn=ffn, use_time_attn=use_time_attn,frames=frames,use_adapter = use_adapter)
 
         self.ln_post = LayerNorm(width)
         
@@ -401,11 +450,13 @@ class CLIP(nn.Module):
                  nb_classes:int = 300,
                  time_attn = False,
                  frames:int = 1,
+                 adapter = False,
                  ):
         super().__init__()
         self.patch_size=vision_patch_size
         vision_heads = vision_width // 64
         self.layers = vision_layers
+        self.use_adapter = adapter#!!!!!!!!!!!using AIM adapter
         self.visual = VisionTransformer(
             input_resolution=image_resolution,
             patch_size=vision_patch_size,
@@ -414,7 +465,8 @@ class CLIP(nn.Module):
             heads=vision_heads,
             ffn=ffn,
             use_time_attn=time_attn,
-            frames=frames)
+            frames=frames,
+            use_adapter = adapter)
         
         self.head = nn.Linear(vision_width, nb_classes) # 수동으로 class 수 맞춰줘야함 load엑서 변수가 통제되어있음
 
@@ -435,6 +487,33 @@ class CLIP(nn.Module):
                 nn.init.normal_(self.visual.attnpool.k_proj.weight, std=std)
                 nn.init.normal_(self.visual.attnpool.v_proj.weight, std=std)
                 nn.init.normal_(self.visual.attnpool.c_proj.weight, std=std)
+        if self.use_adapter:
+        ##!!!!!!!!!!!!initialize S_Adapter
+            for n, m in self.visual.transformer.named_modules():
+                if 'S_adapter' in n:
+                    for n2, m2 in m.named_modules():
+                        if 'D_fc2' in n2:
+                            if isinstance(m2, nn.Linear):
+                                nn.init.constant_(m2.weight, 0)
+                                nn.init.constant_(m2.bias, 0)
+
+            ## initialize T_Adapter
+            for n, m in self.visual.transformer.named_modules():
+                if 'T_adapter' in n:
+                    for n2, m2 in m.named_modules():
+                        if 'D_fc2' in n2:
+                            if isinstance(m2, nn.Linear):
+                                nn.init.constant_(m2.weight, 0)
+                                nn.init.constant_(m2.bias, 0)
+
+            ## initialize MLP_Adapter
+            for n, m in self.visual.transformer.named_modules():
+                if 'MLP_adapter' in n:
+                    for n2, m2 in m.named_modules():
+                        if 'D_fc2' in n2:
+                            if isinstance(m2, nn.Linear):
+                                nn.init.constant_(m2.weight, 0)
+                                nn.init.constant_(m2.bias, 0)
 
     def build_attention_mask(self):
         # lazily create causal attention mask, with full attention between the vision tokens
@@ -496,13 +575,14 @@ def build_model(state_dict: dict,args=None):
         nb_classes=args.nb_classes
         use_clip_time_attn = args.use_clip_time_attn
         num_frames=args.num_frames
+        use_adapter = args.use_adapter
     else:#!My hard coding
         ffn = 'locality'
         nb_classes=300
     #!!!!!!!!!!!!!!!!!!!!!!!!!!
 
     model = CLIP(
-        image_resolution, vision_layers, vision_width, vision_patch_size,ffn=ffn,nb_classes=nb_classes, time_attn=use_clip_time_attn, frames=num_frames
+        image_resolution, vision_layers, vision_width, vision_patch_size,ffn=ffn,nb_classes=nb_classes, time_attn=use_clip_time_attn, frames=num_frames,adapter = use_adapter
     )
 
     for key in ["input_resolution", "context_length", "vocab_size"]:
