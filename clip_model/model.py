@@ -281,7 +281,7 @@ class ResidualAttentionBlock(nn.Module):
         self.frames = frames
         ########################!
         
-        assert self.use_adapter == (self.ffn=='mlp')
+        assert self.ffn == 'mlp' if self.use_adapter else self.ffn != None
         ########! Adapter ######! 
         if self.use_adapter:
             self.MLP_adapter = Adapter(d_model, skip_connect=False)
@@ -341,7 +341,7 @@ class ResidualAttentionBlock(nn.Module):
         if self.ffn == 'mlp':
             if self.use_adapter:
                 xn = self.ln_2(x)
-                x = x + self.mlp(xn) + self.MLP_adapter(xn)
+                x = x + self.mlp(xn) + 0.5*self.MLP_adapter(xn)
             else:
                 x = x + self.mlp(self.ln_2(x))#!Original path
         elif self.ffn == 'locality':
@@ -373,11 +373,14 @@ class ResidualAttentionBlock(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None, ffn: str = 'mlp', use_time_attn = False,frames = 1,use_adapter=False):
+    def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None, ffn: str = 'mlp', use_time_attn = False,frames = 1,use_adapter=False,module_layers:list = None):
         super().__init__()
         self.width = width
         self.layers = layers
-        self.resblocks = nn.ModuleList([ResidualAttentionBlock(width, heads, attn_mask,ffn=ffn, use_time_attn=use_time_attn,frames=frames,use_adapter=use_adapter) for _ in range(layers)])
+        self.module_layers=module_layers
+        self.resblocks = nn.ModuleList([ResidualAttentionBlock(width, heads, attn_mask,ffn=ffn, use_time_attn=use_time_attn,frames=frames,use_adapter=use_adapter) if num in self.module_layers #!Additional Module Layers.
+                                        else ResidualAttentionBlock(width,heads,attn_mask,ffn='mlp',use_time_attn=False,frames=frames,use_adapter=False)#! Vanila Block
+                                        for num in range(layers)])
 
     def forward(self, x: torch.Tensor):
         for blk in self.resblocks:
@@ -386,7 +389,7 @@ class Transformer(nn.Module):
 
 
 class VisionTransformer(nn.Module):
-    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int,ffn: str = 'mlp',use_time_attn: bool = False,frames:int = 1, use_adapter=False):
+    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int,ffn: str = 'mlp',use_time_attn: bool = False,frames:int = 1, use_adapter=False,module_layers:list = None):
         super().__init__()
         self.frames=frames#!
         self.use_time_attn=use_time_attn#!
@@ -399,7 +402,7 @@ class VisionTransformer(nn.Module):
             self.time_positional_embedding = nn.Parameter(scale * torch.randn(1,frames,1, width))
         self.ln_pre = LayerNorm(width)
 
-        self.transformer = Transformer(width, layers, heads,ffn=ffn, use_time_attn=use_time_attn,frames=frames,use_adapter = use_adapter)
+        self.transformer = Transformer(width, layers, heads,ffn=ffn, use_time_attn=use_time_attn,frames=frames,use_adapter = use_adapter,module_layers=module_layers)
 
         self.ln_post = LayerNorm(width)
         
@@ -451,6 +454,7 @@ class CLIP(nn.Module):
                  time_attn = False,
                  frames:int = 1,
                  adapter = False,
+                 module_layers:list = None
                  ):
         super().__init__()
         self.patch_size=vision_patch_size
@@ -466,7 +470,8 @@ class CLIP(nn.Module):
             ffn=ffn,
             use_time_attn=time_attn,
             frames=frames,
-            use_adapter = adapter)
+            use_adapter = adapter,
+            module_layers=module_layers)
         
         self.head = nn.Linear(vision_width, nb_classes) # 수동으로 class 수 맞춰줘야함 load엑서 변수가 통제되어있음
 
@@ -542,7 +547,7 @@ def convert_weights(model: nn.Module):
     """Convert applicable model parameters to fp16"""
 
     def _convert_weights_to_fp16(l):
-        if isinstance(l, (nn.Conv1d, nn.Conv2d, nn.Linear,nn.BatchNorm2d)):
+        if isinstance(l, (nn.Conv1d, nn.Conv2d, nn. Linear,nn.BatchNorm2d)):
             l.weight.data = l.weight.data.half()
             if l.bias is not None:
                 l.bias.data = l.bias.data.half()
@@ -576,14 +581,23 @@ def build_model(state_dict: dict,args=None):
         use_clip_time_attn = args.use_clip_time_attn
         num_frames=args.num_frames
         use_adapter = args.use_adapter
+        module_layers=args.module_layers
+        print(module_layers)
     else:#!My hard coding
         ffn = 'locality'
         nb_classes=300
     #!!!!!!!!!!!!!!!!!!!!!!!!!!
 
     model = CLIP(
-        image_resolution, vision_layers, vision_width, vision_patch_size,ffn=ffn,nb_classes=nb_classes, time_attn=use_clip_time_attn, frames=num_frames,adapter = use_adapter
-    )
+        image_resolution, vision_layers, vision_width, vision_patch_size,
+        ffn=ffn,
+        nb_classes=nb_classes, 
+        time_attn=use_clip_time_attn, 
+        frames=num_frames,
+        adapter = use_adapter, 
+        module_layers=module_layers
+        )
+
 
     for key in ["input_resolution", "context_length", "vocab_size"]:
         if key in state_dict:
@@ -592,8 +606,8 @@ def build_model(state_dict: dict,args=None):
     convert_weights(model)
     model.load_state_dict(state_dict, strict=False)
     if args.use_clip_time_attn:
-        with torch.no_grad():
-            for i in range(12):
+        with torch.no_grad():#! module_layers에 들어가는 것만 한다. 
+            for i in module_layers:
                 model.visual.transformer.resblocks[i].time_attn.out_proj.weight.copy_(model.visual.transformer.resblocks[i].attn.out_proj.weight)
                 model.visual.transformer.resblocks[i].time_attn.out_proj.bias.copy_(model.visual.transformer.resblocks[i].attn.out_proj.bias)
                 model.visual.transformer.resblocks[i].ln_time.weight.copy_(model.visual.transformer.resblocks[i].ln_1.weight)

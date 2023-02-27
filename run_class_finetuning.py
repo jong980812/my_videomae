@@ -202,6 +202,7 @@ def get_args():
     parser.add_argument('--unfreeze_layers', default=None, nargs='+', type=str)
     parser.add_argument('--use_two_model', action='store_true')
     parser.add_argument('--use_adapter', action='store_true')
+    parser.add_argument('--module_layers', type=int,nargs='+', help='a list of values')
 
     known_args, _ = parser.parse_known_args()
 
