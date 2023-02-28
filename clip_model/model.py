@@ -192,10 +192,12 @@ class ResidualAttentionBlock(nn.Module):
     def forward(self, x):
         l,n,d=x.shape
         batch_size=n//self.frames
+        #S-MSA Path
         if self.use_adapter:
             x = x + self.S_adapter(self.attention(self.ln_1(x)))
         else:
             x = x + self.attention(self.ln_1(x))#!Original path
+        #T-MSA Path 
         if self.use_time_attn:
             xt = rearrange(x, 'l (b t) d -> t (b l) d',t=self.frames)#!
             if self.use_adapter:
@@ -206,7 +208,7 @@ class ResidualAttentionBlock(nn.Module):
             else: 
                 xt =self.time_attention(self.ln_time(xt))
             xt = rearrange(xt, 't (b l) d -> l (b t) d',l=l,d=d,b=batch_size,t=self.frames)#!L,N,D
-        x = x + xt
+            x = x + xt
         
         if self.ffn == 'mlp':
             if self.use_adapter:
@@ -370,6 +372,7 @@ class CLIP(nn.Module):
         self.layers = vision_layers
         self.use_adapter = adapter#!!!!!!!!!!!using AIM adapter
         self.time_attn_random = time_attn_random
+        self.module_layers=module_layers
         self.visual = VisionTransformer(
             input_resolution=image_resolution,
             patch_size=vision_patch_size,
@@ -380,7 +383,7 @@ class CLIP(nn.Module):
             use_time_attn=time_attn,
             frames=frames,
             use_adapter = adapter,
-            module_layers=module_layers,
+            module_layers=self.module_layers,
             adapter_scale =adapter_scale,
             num_t_adapter=num_t_adapter)
         
@@ -443,11 +446,12 @@ class CLIP(nn.Module):
         attn_std = self.visual.transformer.width ** -0.5
         fc_std = (2 * self.visual.transformer.width) ** -0.5
         if self.time_attn_random:
-           for block in self.visual.transformer.resblocks:
-                nn.init.normal_(block.time_attn.in_proj_weight, std=attn_std)
-                nn.init.normal_(block.time_attn.out_proj.weight, std=proj_std)
-                # nn.init.normal_(block.mlp.c_fc.weight, std=fc_std)
-                # nn.init.normal_(block.mlp.c_proj.weight, std=proj_std)
+           for i,block in enumerate(self.visual.transformer.resblocks):
+               if i in self.module_layers:
+                    nn.init.normal_(block.time_attn.in_proj_weight, std=attn_std)
+                    nn.init.normal_(block.time_attn.out_proj.weight, std=proj_std)
+                    # nn.init.normal_(block.mlp.c_fc.weight, std=fc_std)
+                    # nn.init.normal_(block.mlp.c_proj.weight, std=proj_std)
         print("Weight Initialize")
     def build_attention_mask(self):
         # lazily create causal attention mask, with full attention between the vision tokens
