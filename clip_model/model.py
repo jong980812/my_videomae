@@ -1,6 +1,6 @@
 from collections import OrderedDict
 from typing import Tuple, Union
-from timm.models.layers import DropPath
+from timm.models.layers import DropPath,to_2tuple, trunc_normal_
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -403,6 +403,15 @@ class CLIP(nn.Module):
         #         nn.init.normal_(self.visual.attnpool.k_proj.weight, std=std)
         #         nn.init.normal_(self.visual.attnpool.v_proj.weight, std=std)
         #         nn.init.normal_(self.visual.attnpool.c_proj.weight, std=std)
+        def _init_weights(m):
+            if isinstance(m, nn.Linear):
+                trunc_normal_(m.weight, std=.02)
+                if isinstance(m, nn.Linear) and m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.LayerNorm):
+                nn.init.constant_(m.bias, 0)
+                nn.init.constant_(m.weight, 1.0)
+        self.apply(_init_weights)
         if self.use_adapter:
         ##!!!!!!!!!!!!initialize S_Adapter
             for n, m in self.visual.transformer.named_modules():
@@ -439,7 +448,7 @@ class CLIP(nn.Module):
                 nn.init.normal_(block.time_attn.out_proj.weight, std=proj_std)
                 # nn.init.normal_(block.mlp.c_fc.weight, std=fc_std)
                 # nn.init.normal_(block.mlp.c_proj.weight, std=proj_std)
-
+        print("Weight Initialize")
     def build_attention_mask(self):
         # lazily create causal attention mask, with full attention between the vision tokens
         # pytorch uses additive attention mask; fill with -inf
@@ -531,12 +540,14 @@ def build_model(state_dict: dict,args=None):
 
     convert_weights(model)
     model.load_state_dict(state_dict, strict=False)
-    if args.use_clip_time_attn:
+    if args.use_clip_time_attn and not args.time_attn_random:
         with torch.no_grad():#! module_layers에 들어가는 것만 한다. 
             for i in module_layers:
                 model.visual.transformer.resblocks[i].time_attn.out_proj.weight.copy_(model.visual.transformer.resblocks[i].attn.out_proj.weight)
                 model.visual.transformer.resblocks[i].time_attn.out_proj.bias.copy_(model.visual.transformer.resblocks[i].attn.out_proj.bias)
+                model.visual.transformer.resblocks[i].time_attn.in_proj_weight.copy_(model.visual.transformer.resblocks[i].attn.in_proj_weight)
+                model.visual.transformer.resblocks[i].time_attn.in_proj_bias.copy_(model.visual.transformer.resblocks[i].attn.in_proj_bias)
                 model.visual.transformer.resblocks[i].ln_time.weight.copy_(model.visual.transformer.resblocks[i].ln_1.weight)
                 model.visual.transformer.resblocks[i].ln_time.bias.copy_(model.visual.transformer.resblocks[i].ln_1.bias)
-        print("Time Attention module initialize same with self.attn")
+        print("Time Attention module copy with self.attn")
     return model
