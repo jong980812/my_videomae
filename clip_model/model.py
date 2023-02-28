@@ -1,6 +1,6 @@
 from collections import OrderedDict
 from typing import Tuple, Union
-
+from timm.models.layers import DropPath
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -32,8 +32,6 @@ class h_sigmoid(nn.Module):
 
     def forward(self, x):
         return self.relu(x + 3) / 6
-
-
 class h_swish(nn.Module):
     def __init__(self, inplace=True):
         super(h_swish, self).__init__()
@@ -41,7 +39,6 @@ class h_swish(nn.Module):
 
     def forward(self, x):
         return x * self.sigmoid(x)
-
 class LocalityFeedForward(nn.Module):
     def __init__(self, in_dim=768, out_dim=768, stride=1, expand_ratio=4., act='hs+se', reduction=4,
                  wo_dp_conv=False, dp_first=False):
@@ -103,151 +100,8 @@ class LocalityFeedForward(nn.Module):
         x = x + self.conv(x)
         return x
 
-class Bottleneck(nn.Module):
-    expansion = 4
-
-    def __init__(self, inplanes, planes, stride=1):
-        super().__init__()
-
-        # all conv layers have stride 1. an avgpool is performed after the second convolution when stride > 1
-        self.conv1 = nn.Conv2d(inplanes, planes, 1, bias=False)
-        self.bn1 = nn.BatchNorm2d(planes)
-        self.relu1 = nn.ReLU(inplace=True)
-
-        self.conv2 = nn.Conv2d(planes, planes, 3, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(planes)
-        self.relu2 = nn.ReLU(inplace=True)
-
-        self.avgpool = nn.AvgPool2d(stride) if stride > 1 else nn.Identity()
-
-        self.conv3 = nn.Conv2d(planes, planes * self.expansion, 1, bias=False)
-        self.bn3 = nn.BatchNorm2d(planes * self.expansion)
-        self.relu3 = nn.ReLU(inplace=True)
-
-        self.downsample = None
-        self.stride = stride
-
-        if stride > 1 or inplanes != planes * Bottleneck.expansion:
-            # downsampling layer is prepended with an avgpool, and the subsequent convolution has stride 1
-            self.downsample = nn.Sequential(OrderedDict([
-                ("-1", nn.AvgPool2d(stride)),
-                ("0", nn.Conv2d(inplanes, planes * self.expansion, 1, stride=1, bias=False)),
-                ("1", nn.BatchNorm2d(planes * self.expansion))
-            ]))
-
-    def forward(self, x: torch.Tensor):
-        identity = x
-
-        out = self.relu1(self.bn1(self.conv1(x)))
-        out = self.relu2(self.bn2(self.conv2(out)))
-        out = self.avgpool(out)
-        out = self.bn3(self.conv3(out))
-
-        if self.downsample is not None:
-            identity = self.downsample(x)
-
-        out += identity
-        out = self.relu3(out)
-        return out
 
 
-class AttentionPool2d(nn.Module):
-    def __init__(self, spacial_dim: int, embed_dim: int, num_heads: int, output_dim: int = None):
-        super().__init__()
-        self.positional_embedding = nn.Parameter(torch.randn(spacial_dim ** 2 + 1, embed_dim) / embed_dim ** 0.5)
-        self.k_proj = nn.Linear(embed_dim, embed_dim)
-        self.q_proj = nn.Linear(embed_dim, embed_dim)
-        self.v_proj = nn.Linear(embed_dim, embed_dim)
-        self.c_proj = nn.Linear(embed_dim, output_dim or embed_dim)
-        self.num_heads = num_heads
-
-    def forward(self, x):
-        x = x.flatten(start_dim=2).permute(2, 0, 1)  # NCHW -> (HW)NC
-        x = torch.cat([x.mean(dim=0, keepdim=True), x], dim=0)  # (HW+1)NC
-        x = x + self.positional_embedding[:, None, :].to(x.dtype)  # (HW+1)NC
-        x, _ = F.multi_head_attention_forward(
-            query=x[:1], key=x, value=x,
-            embed_dim_to_check=x.shape[-1],
-            num_heads=self.num_heads,
-            q_proj_weight=self.q_proj.weight,
-            k_proj_weight=self.k_proj.weight,
-            v_proj_weight=self.v_proj.weight,
-            in_proj_weight=None,
-            in_proj_bias=torch.cat([self.q_proj.bias, self.k_proj.bias, self.v_proj.bias]),
-            bias_k=None,
-            bias_v=None,
-            add_zero_attn=False,
-            dropout_p=0,
-            out_proj_weight=self.c_proj.weight,
-            out_proj_bias=self.c_proj.bias,
-            use_separate_proj_weight=True,
-            training=self.training,
-            need_weights=False
-        )
-        return x.squeeze(0)
-
-
-class ModifiedResNet(nn.Module):
-    """
-    A ResNet class that is similar to torchvision's but contains the following changes:
-    - There are now 3 "stem" convolutions as opposed to 1, with an average pool instead of a max pool.
-    - Performs anti-aliasing strided convolutions, where an avgpool is prepended to convolutions with stride > 1
-    - The final pooling layer is a QKV attention instead of an average pool
-    """
-
-    def __init__(self, layers, output_dim, heads, input_resolution=224, width=64):
-        super().__init__()
-        self.output_dim = output_dim
-        self.input_resolution = input_resolution
-
-        # the 3-layer stem
-        self.conv1 = nn.Conv2d(3, width // 2, kernel_size=3, stride=2, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(width // 2)
-        self.relu1 = nn.ReLU(inplace=True)
-        self.conv2 = nn.Conv2d(width // 2, width // 2, kernel_size=3, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(width // 2)
-        self.relu2 = nn.ReLU(inplace=True)
-        self.conv3 = nn.Conv2d(width // 2, width, kernel_size=3, padding=1, bias=False)
-        self.bn3 = nn.BatchNorm2d(width)
-        self.relu3 = nn.ReLU(inplace=True)
-        self.avgpool = nn.AvgPool2d(2)
-
-        # residual layers
-        self._inplanes = width  # this is a *mutable* variable used during construction
-        self.layer1 = self._make_layer(width, layers[0])
-        self.layer2 = self._make_layer(width * 2, layers[1], stride=2)
-        self.layer3 = self._make_layer(width * 4, layers[2], stride=2)
-        self.layer4 = self._make_layer(width * 8, layers[3], stride=2)
-
-        embed_dim = width * 32  # the ResNet feature dimension
-        self.attnpool = AttentionPool2d(input_resolution // 32, embed_dim, heads, output_dim)
-
-    def _make_layer(self, planes, blocks, stride=1):
-        layers = [Bottleneck(self._inplanes, planes, stride)]
-
-        self._inplanes = planes * Bottleneck.expansion
-        for _ in range(1, blocks):
-            layers.append(Bottleneck(self._inplanes, planes))
-
-        return nn.Sequential(*layers)
-
-    def forward(self, x):
-        def stem(x):
-            x = self.relu1(self.bn1(self.conv1(x)))
-            x = self.relu2(self.bn2(self.conv2(x)))
-            x = self.relu3(self.bn3(self.conv3(x)))
-            x = self.avgpool(x)
-            return x
-
-        x = x.type(self.conv1.weight.dtype)
-        x = stem(x)
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
-        x = self.attnpool(x)
-
-        return x
 
 
 class LayerNorm(nn.LayerNorm):
@@ -268,26 +122,38 @@ class QuickGELU(nn.Module):
 
 
 class ResidualAttentionBlock(nn.Module):
-    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None, ffn:str='mlp',use_time_attn :bool = False,frames:int = 1,use_adapter=False,adapter_scale :float= 0.5,):
+    def __init__(self, d_model: int,
+                 n_head: int,
+                 attn_mask: torch.Tensor = None,
+                 ffn:str='mlp',
+                 use_time_attn :bool = False,
+                 frames:int = 1,
+                 use_adapter=False,
+                 adapter_scale :float = 0.5,
+                 num_t_adapter:int = 1,
+                 drop_path = 0.):
         super().__init__()
         """
         self.time_attn == self.attn
         self.ln_1 == self.ln_time
         """
         ########! Utility ######! 
-        self.use_time_attn=use_time_attn
+        self.use_time_attn = use_time_attn
         self.use_adapter = use_adapter
-        self.ffn=ffn
+        self.ffn = ffn
         self.frames = frames
-        self.adapter_scale=adapter_scale
+        self.adapter_scale = adapter_scale
+        self.num_t_adapter = num_t_adapter
         ########################!
-        
+        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         assert self.ffn == 'mlp' if self.use_adapter else self.ffn != None
         ########! Adapter ######! 
         if self.use_adapter:
             self.MLP_adapter = Adapter(d_model, skip_connect=False)
             self.S_adapter = Adapter(d_model)
             self.T_adapter = Adapter(d_model, skip_connect=False)
+        if self.num_t_adapter == 2:
+            self.T_adapter_in = Adapter(d_model)
         ########################!
         
         self.ln_1 = LayerNorm(d_model)
@@ -333,7 +199,10 @@ class ResidualAttentionBlock(nn.Module):
         if self.use_time_attn:
             xt = rearrange(x, 'l (b t) d -> t (b l) d',t=self.frames)#!
             if self.use_adapter:
-                xt =self.T_adapter(self.time_attention(self.ln_time(xt)))
+                if self.num_t_adapter == 2:
+                    xt =self.T_adapter(self.time_attention(self.T_adapter_in(self.ln_time(xt))))
+                else:
+                    xt =self.T_adapter(self.time_attention(self.ln_time(xt)))
             else: 
                 xt =self.time_attention(self.ln_time(xt))
             xt = rearrange(xt, 't (b l) d -> l (b t) d',l=l,d=d,b=batch_size,t=self.frames)#!L,N,D
@@ -374,12 +243,23 @@ class ResidualAttentionBlock(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None, ffn: str = 'mlp', use_time_attn = False,frames = 1,use_adapter=False,module_layers:list = None,adapter_scale :float= 0.5,):
+    def __init__(self,  width: int,
+                        layers: int, 
+                        heads: int, 
+                        attn_mask: torch.Tensor = None, 
+                        ffn: str = 'mlp', 
+                        use_time_attn = False,
+                        frames = 1,
+                        use_adapter=False,
+                        module_layers:list = None,
+                        adapter_scale :float= 0.5,
+                        num_t_adapter:int=1,
+                        drop_path = 0.):
         super().__init__()
         self.width = width
         self.layers = layers
         self.module_layers=module_layers
-        self.resblocks = nn.ModuleList([ResidualAttentionBlock(width, heads, attn_mask,ffn=ffn, use_time_attn=use_time_attn,frames=frames,use_adapter=use_adapter,adapter_scale=adapter_scale) if num in self.module_layers #!Additional Module Layers.
+        self.resblocks = nn.ModuleList([ResidualAttentionBlock(width, heads, attn_mask,ffn=ffn, use_time_attn=use_time_attn,frames=frames,use_adapter=use_adapter,adapter_scale=adapter_scale,num_t_adapter=num_t_adapter,drop_path = 0.) if num in self.module_layers #!Additional Module Layers.
                                         else ResidualAttentionBlock(width,heads,attn_mask,ffn='mlp',use_time_attn=False,frames=frames,use_adapter=False)#! Vanila Block
                                         for num in range(layers)])
 
@@ -390,10 +270,24 @@ class Transformer(nn.Module):
 
 
 class VisionTransformer(nn.Module):
-    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int,ffn: str = 'mlp',use_time_attn: bool = False,frames:int = 1, use_adapter=False,module_layers:list = None,adapter_scale :float= 0.5,):
+    def __init__(self,
+                 input_resolution: int, 
+                 patch_size: int, 
+                 width: int, 
+                 layers: int, 
+                 heads: int,
+                 ffn: str = 'mlp',
+                 use_time_attn: bool = False,
+                 frames:int = 1, 
+                 use_adapter=False,
+                 module_layers:list = None,
+                 adapter_scale :float= 0.5,
+                 num_t_adapter:int=1, 
+                 drop_path = 0.):
         super().__init__()
         self.frames=frames#!
         self.use_time_attn=use_time_attn#!
+        
         self.input_resolution = input_resolution
         self.conv1 = nn.Conv2d(in_channels=3, out_channels=width, kernel_size=patch_size, stride=patch_size, bias=False)
         scale = width ** -0.5
@@ -403,7 +297,17 @@ class VisionTransformer(nn.Module):
             self.time_positional_embedding = nn.Parameter(scale * torch.randn(1,frames,1, width))
         self.ln_pre = LayerNorm(width)
 
-        self.transformer = Transformer(width, layers, heads,ffn=ffn, use_time_attn=use_time_attn,frames=frames,use_adapter = use_adapter,module_layers=module_layers,adapter_scale=adapter_scale)
+        self.transformer = Transformer(width, 
+                                       layers,
+                                       heads,
+                                       ffn=ffn,
+                                       use_time_attn=self.use_time_attn,
+                                       frames=self.frames,
+                                       use_adapter = use_adapter,
+                                       module_layers=module_layers,
+                                       adapter_scale=adapter_scale,
+                                       num_t_adapter=num_t_adapter,
+                                       drop_path=drop_path)
 
         self.ln_post = LayerNorm(width)
         
@@ -457,12 +361,15 @@ class CLIP(nn.Module):
                  adapter = False,
                  module_layers:list = None,
                  adapter_scale :float= 0.5,
+                 num_t_adapter:int=1,
+                 time_attn_random:bool = False,
                  ):
         super().__init__()
         self.patch_size=vision_patch_size
         vision_heads = vision_width // 64
         self.layers = vision_layers
         self.use_adapter = adapter#!!!!!!!!!!!using AIM adapter
+        self.time_attn_random = time_attn_random
         self.visual = VisionTransformer(
             input_resolution=image_resolution,
             patch_size=vision_patch_size,
@@ -474,7 +381,8 @@ class CLIP(nn.Module):
             frames=frames,
             use_adapter = adapter,
             module_layers=module_layers,
-            adapter_scale =adapter_scale)
+            adapter_scale =adapter_scale,
+            num_t_adapter=num_t_adapter)
         
         self.head = nn.Linear(vision_width, nb_classes) # 수동으로 class 수 맞춰줘야함 load엑서 변수가 통제되어있음
 
@@ -488,13 +396,13 @@ class CLIP(nn.Module):
 
     def initialize_parameters(self):
 
-        if isinstance(self.visual, ModifiedResNet):
-            if self.visual.attnpool is not None:
-                std = self.visual.attnpool.c_proj.in_features ** -0.5
-                nn.init.normal_(self.visual.attnpool.q_proj.weight, std=std)
-                nn.init.normal_(self.visual.attnpool.k_proj.weight, std=std)
-                nn.init.normal_(self.visual.attnpool.v_proj.weight, std=std)
-                nn.init.normal_(self.visual.attnpool.c_proj.weight, std=std)
+        # if isinstance(self.visual, ModifiedResNet):
+        #     if self.visual.attnpool is not None:
+        #         std = self.visual.attnpool.c_proj.in_features ** -0.5
+        #         nn.init.normal_(self.visual.attnpool.q_proj.weight, std=std)
+        #         nn.init.normal_(self.visual.attnpool.k_proj.weight, std=std)
+        #         nn.init.normal_(self.visual.attnpool.v_proj.weight, std=std)
+        #         nn.init.normal_(self.visual.attnpool.c_proj.weight, std=std)
         if self.use_adapter:
         ##!!!!!!!!!!!!initialize S_Adapter
             for n, m in self.visual.transformer.named_modules():
@@ -522,6 +430,15 @@ class CLIP(nn.Module):
                             if isinstance(m2, nn.Linear):
                                 nn.init.constant_(m2.weight, 0)
                                 nn.init.constant_(m2.bias, 0)
+        proj_std = (self.visual.transformer.width ** -0.5) * ((2 * self.visual.transformer.layers) ** -0.5)
+        attn_std = self.visual.transformer.width ** -0.5
+        fc_std = (2 * self.visual.transformer.width) ** -0.5
+        if self.time_attn_random:
+           for block in self.visual.transformer.resblocks:
+                nn.init.normal_(block.time_attn.in_proj_weight, std=attn_std)
+                nn.init.normal_(block.time_attn.out_proj.weight, std=proj_std)
+                # nn.init.normal_(block.mlp.c_fc.weight, std=fc_std)
+                # nn.init.normal_(block.mlp.c_proj.weight, std=proj_std)
 
     def build_attention_mask(self):
         # lazily create causal attention mask, with full attention between the vision tokens
@@ -586,6 +503,8 @@ def build_model(state_dict: dict,args=None):
         use_adapter = args.use_adapter
         module_layers=args.module_layers
         adapter_scale = args.adapter_scale
+        num_t_adapter = args.num_t_adapter
+        time_attn_random = args.time_attn_random
         print(module_layers)
     else:#!My hard coding
         ffn = 'locality'
@@ -601,6 +520,8 @@ def build_model(state_dict: dict,args=None):
         adapter = use_adapter, 
         module_layers=module_layers,
         adapter_scale=adapter_scale,
+        num_t_adapter=num_t_adapter,
+        time_attn_random = time_attn_random,
         )
 
 

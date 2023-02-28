@@ -204,6 +204,9 @@ def get_args():
     parser.add_argument('--use_adapter', action='store_true')
     parser.add_argument('--module_layers', type=int,nargs='+', help='a list of values')
     parser.add_argument('--adapter_scale',default=0.5,type=float)
+    parser.add_argument('--time_attn_random', action='store_true')
+    parser.add_argument('--num_t_adapter',default=1,type=int)
+    
     
 
     known_args, _ = parser.parse_known_args()

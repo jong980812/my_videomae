@@ -47,7 +47,9 @@
                     "--clip_frames","16",
                     "--use_clip_time_attn",
                     "--use_adapter",
-                    "--module_layers","1","2","3",
+                    "--module_layers","0","1","2","3","4","5","6","7","8","9","10","11",
+                    "--time_attn_random",
+                    "--num_t_adapter","2",
                     //
                     // "--use_mae",
                     // "--mae_model", "vit_base_patch16_224",
