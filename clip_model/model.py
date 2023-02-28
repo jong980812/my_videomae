@@ -268,7 +268,7 @@ class QuickGELU(nn.Module):
 
 
 class ResidualAttentionBlock(nn.Module):
-    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None, ffn:str='mlp',use_time_attn :bool = False,frames:int = 1,use_adapter=False):
+    def __init__(self, d_model: int, n_head: int, attn_mask: torch.Tensor = None, ffn:str='mlp',use_time_attn :bool = False,frames:int = 1,use_adapter=False,adapter_scale :float= 0.5,):
         super().__init__()
         """
         self.time_attn == self.attn
@@ -279,6 +279,7 @@ class ResidualAttentionBlock(nn.Module):
         self.use_adapter = use_adapter
         self.ffn=ffn
         self.frames = frames
+        self.adapter_scale=adapter_scale
         ########################!
         
         assert self.ffn == 'mlp' if self.use_adapter else self.ffn != None
@@ -341,7 +342,7 @@ class ResidualAttentionBlock(nn.Module):
         if self.ffn == 'mlp':
             if self.use_adapter:
                 xn = self.ln_2(x)
-                x = x + self.mlp(xn) + 0.5*self.MLP_adapter(xn)
+                x = x + self.mlp(xn) + self.adapter_scale*self.MLP_adapter(xn)
             else:
                 x = x + self.mlp(self.ln_2(x))#!Original path
         elif self.ffn == 'locality':
@@ -373,12 +374,12 @@ class ResidualAttentionBlock(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None, ffn: str = 'mlp', use_time_attn = False,frames = 1,use_adapter=False,module_layers:list = None):
+    def __init__(self, width: int, layers: int, heads: int, attn_mask: torch.Tensor = None, ffn: str = 'mlp', use_time_attn = False,frames = 1,use_adapter=False,module_layers:list = None,adapter_scale :float= 0.5,):
         super().__init__()
         self.width = width
         self.layers = layers
         self.module_layers=module_layers
-        self.resblocks = nn.ModuleList([ResidualAttentionBlock(width, heads, attn_mask,ffn=ffn, use_time_attn=use_time_attn,frames=frames,use_adapter=use_adapter) if num in self.module_layers #!Additional Module Layers.
+        self.resblocks = nn.ModuleList([ResidualAttentionBlock(width, heads, attn_mask,ffn=ffn, use_time_attn=use_time_attn,frames=frames,use_adapter=use_adapter,adapter_scale=adapter_scale) if num in self.module_layers #!Additional Module Layers.
                                         else ResidualAttentionBlock(width,heads,attn_mask,ffn='mlp',use_time_attn=False,frames=frames,use_adapter=False)#! Vanila Block
                                         for num in range(layers)])
 
@@ -389,7 +390,7 @@ class Transformer(nn.Module):
 
 
 class VisionTransformer(nn.Module):
-    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int,ffn: str = 'mlp',use_time_attn: bool = False,frames:int = 1, use_adapter=False,module_layers:list = None):
+    def __init__(self, input_resolution: int, patch_size: int, width: int, layers: int, heads: int,ffn: str = 'mlp',use_time_attn: bool = False,frames:int = 1, use_adapter=False,module_layers:list = None,adapter_scale :float= 0.5,):
         super().__init__()
         self.frames=frames#!
         self.use_time_attn=use_time_attn#!
@@ -402,7 +403,7 @@ class VisionTransformer(nn.Module):
             self.time_positional_embedding = nn.Parameter(scale * torch.randn(1,frames,1, width))
         self.ln_pre = LayerNorm(width)
 
-        self.transformer = Transformer(width, layers, heads,ffn=ffn, use_time_attn=use_time_attn,frames=frames,use_adapter = use_adapter,module_layers=module_layers)
+        self.transformer = Transformer(width, layers, heads,ffn=ffn, use_time_attn=use_time_attn,frames=frames,use_adapter = use_adapter,module_layers=module_layers,adapter_scale=adapter_scale)
 
         self.ln_post = LayerNorm(width)
         
@@ -454,7 +455,8 @@ class CLIP(nn.Module):
                  time_attn = False,
                  frames:int = 1,
                  adapter = False,
-                 module_layers:list = None
+                 module_layers:list = None,
+                 adapter_scale :float= 0.5,
                  ):
         super().__init__()
         self.patch_size=vision_patch_size
@@ -471,7 +473,8 @@ class CLIP(nn.Module):
             use_time_attn=time_attn,
             frames=frames,
             use_adapter = adapter,
-            module_layers=module_layers)
+            module_layers=module_layers,
+            adapter_scale =adapter_scale)
         
         self.head = nn.Linear(vision_width, nb_classes) # 수동으로 class 수 맞춰줘야함 load엑서 변수가 통제되어있음
 
@@ -582,12 +585,13 @@ def build_model(state_dict: dict,args=None):
         num_frames=args.num_frames
         use_adapter = args.use_adapter
         module_layers=args.module_layers
+        adapter_scale = args.adapter_scale
         print(module_layers)
     else:#!My hard coding
         ffn = 'locality'
         nb_classes=300
     #!!!!!!!!!!!!!!!!!!!!!!!!!!
-
+    
     model = CLIP(
         image_resolution, vision_layers, vision_width, vision_patch_size,
         ffn=ffn,
@@ -595,7 +599,8 @@ def build_model(state_dict: dict,args=None):
         time_attn=use_clip_time_attn, 
         frames=num_frames,
         adapter = use_adapter, 
-        module_layers=module_layers
+        module_layers=module_layers,
+        adapter_scale=adapter_scale,
         )
 
 

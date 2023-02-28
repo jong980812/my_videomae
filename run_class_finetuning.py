@@ -203,6 +203,8 @@ def get_args():
     parser.add_argument('--use_two_model', action='store_true')
     parser.add_argument('--use_adapter', action='store_true')
     parser.add_argument('--module_layers', type=int,nargs='+', help='a list of values')
+    parser.add_argument('--adapter_scale',default=0.5,type=float)
+    
 
     known_args, _ = parser.parse_known_args()
 
