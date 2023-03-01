@@ -208,12 +208,12 @@ class ResidualAttentionBlock(nn.Module):
             else: 
                 xt =self.time_attention(self.ln_time(xt))
             xt = rearrange(xt, 't (b l) d -> l (b t) d',l=l,d=d,b=batch_size,t=self.frames)#!L,N,D
-            x = x + xt
+            x = x + self.drop_path(xt)
         
         if self.ffn == 'mlp':
             if self.use_adapter:
                 xn = self.ln_2(x)
-                x = x + self.mlp(xn) + self.adapter_scale*self.MLP_adapter(xn)
+                x = x + self.mlp(xn) + self.drop_path(self.adapter_scale*self.MLP_adapter(xn))
             else:
                 x = x + self.mlp(self.ln_2(x))#!Original path
         elif self.ffn == 'locality':
@@ -261,7 +261,7 @@ class Transformer(nn.Module):
         self.width = width
         self.layers = layers
         self.module_layers=module_layers
-        self.resblocks = nn.ModuleList([ResidualAttentionBlock(width, heads, attn_mask,ffn=ffn, use_time_attn=use_time_attn,frames=frames,use_adapter=use_adapter,adapter_scale=adapter_scale,num_t_adapter=num_t_adapter,drop_path = 0.) if num in self.module_layers #!Additional Module Layers.
+        self.resblocks = nn.ModuleList([ResidualAttentionBlock(width, heads, attn_mask,ffn=ffn, use_time_attn=use_time_attn,frames=frames,use_adapter=use_adapter,adapter_scale=adapter_scale,num_t_adapter=num_t_adapter,drop_path = drop_path) if num in self.module_layers #!Additional Module Layers.
                                         else ResidualAttentionBlock(width,heads,attn_mask,ffn='mlp',use_time_attn=False,frames=frames,use_adapter=False)#! Vanila Block
                                         for num in range(layers)])
 
@@ -365,6 +365,7 @@ class CLIP(nn.Module):
                  adapter_scale :float= 0.5,
                  num_t_adapter:int=1,
                  time_attn_random:bool = False,
+                 drop_path : float = 0.0,
                  ):
         super().__init__()
         self.patch_size=vision_patch_size
@@ -385,7 +386,8 @@ class CLIP(nn.Module):
             use_adapter = adapter,
             module_layers=self.module_layers,
             adapter_scale =adapter_scale,
-            num_t_adapter=num_t_adapter)
+            num_t_adapter=num_t_adapter,
+            drop_path=drop_path)
         
         self.head = nn.Linear(vision_width, nb_classes) # 수동으로 class 수 맞춰줘야함 load엑서 변수가 통제되어있음
 
@@ -518,6 +520,7 @@ def build_model(state_dict: dict,args=None):
         adapter_scale = args.adapter_scale
         num_t_adapter = args.num_t_adapter
         time_attn_random = args.time_attn_random
+        drop_path = args.drop_path
         print(module_layers)
     else:#!My hard coding
         ffn = 'locality'
@@ -535,6 +538,7 @@ def build_model(state_dict: dict,args=None):
         adapter_scale=adapter_scale,
         num_t_adapter=num_t_adapter,
         time_attn_random = time_attn_random,
+        drop_path=drop_path
         )
 
 
