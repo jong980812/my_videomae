@@ -151,9 +151,10 @@ class ResidualAttentionBlock(nn.Module):
         if self.use_adapter:
             self.MLP_adapter = Adapter(d_model, skip_connect=False)
             self.S_adapter = Adapter(d_model)
-            self.T_adapter = Adapter(d_model, skip_connect=False)
-        if self.num_t_adapter == 2:
-            self.T_adapter_in = Adapter(d_model)
+            if self.use_time_attn:
+                self.T_adapter = Adapter(d_model,skip_connect=False)#, skip_connect=False)
+                if self.num_t_adapter == 2:
+                    self.T_adapter_in = Adapter(d_model)
         ########################!
         
         self.ln_1 = LayerNorm(d_model)
@@ -295,7 +296,7 @@ class VisionTransformer(nn.Module):
         scale = width ** -0.5
         self.class_embedding = nn.Parameter(scale * torch.randn(width))
         self.positional_embedding = nn.Parameter(scale * torch.randn((input_resolution // patch_size) ** 2 + 1, width))#197,768
-        if frames != 1:#! not 1 frame.
+        if frames != 1 and self.use_time_attn:#! not 1 frame.
             self.time_positional_embedding = nn.Parameter(scale * torch.randn(1,frames,1, width))
         self.ln_pre = LayerNorm(width)
 
