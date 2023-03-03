@@ -137,9 +137,13 @@ class VideoClsDataset(Dataset):
             buffer = self.data_resize(buffer)
             if isinstance(buffer, list):
                 buffer = np.stack(buffer, 0)
-
-            spatial_step = 1.0 * (max(buffer.shape[1], buffer.shape[2]) - self.short_side_size) \
-                                 / (self.test_num_crop - 1)
+            # fix bug (test_crop수가 1 일때 zero division이 발생하는 error debug)
+            if self.test_num_crop == 1:
+                    spatial_step = 1.0 * (max( buffer.shape[1], buffer.shape[2]) - self.short_side_size) \
+                                        / (self.test_num_crop)
+            else:
+                spatial_step = 1.0 * (max( buffer.shape[1], buffer.shape[2]) - self.short_side_size) \
+                                    / (self.test_num_crop - 1)
             temporal_step = max(1.0 * (buffer.shape[0] - self.clip_len) \
                                 / (self.test_num_segment - 1), 0)
             temporal_start = int(chunk_nb * temporal_step)
